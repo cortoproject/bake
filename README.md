@@ -43,7 +43,7 @@ cd my_app
 bake init
 ```
 
-This will have created an simple executable project with the following `project.json` configuation file:
+This will have created an simple executable project with the following `project.json` configuration file:
 
 ```json
 {
@@ -109,7 +109,7 @@ corto locate my_project --all
 ```
 
 #### Do a release build
-By default, bake will build projects in debug mode, which disables optimizations and enables symbols. If you want to build projects in release build, specifiy the `release` configuration, like this:
+By default, bake will build projects in debug mode, which disables optimizations and enables symbols. If you want to build projects in release build, specify the `release` configuration, like this:
 
 ```demo
 bake --cfg release
@@ -737,7 +737,7 @@ Flag | Description
 -----|--------------
 --id | Manually set project id
 -k,--kind | Specify project kind
--i,--includes | Specify paths that contain include files, separated by comma. Include files will be copied to the project include directory in the bake environment. This is not the same as specifiying an include path!
+-i,--includes | Specify paths that contain include files, separated by comma. Include files will be copied to the project include directory in the bake environment. This is not the same as specifying an include path!
 -s,--sources | Specify paths that contain source files, separated by comma. Source files fill be built as part of the project.
 -l,--lang | Specify programming language (default = 'c')
 -a,--artefact | Specify artefact name
