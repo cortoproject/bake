@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 the corto developers
+/* Copyright (c) 2010-2018 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -20,599 +20,122 @@
  */
 
 #include "bake.h"
-#include "parson.h"
 
-extern corto_tls BAKE_PROJECT_KEY;
-
-static
-bake_project_attr* bake_project_parseValue(
-    bake_project *p,
-    const char *package_id,
-    bake_project_attr *existing,
-    JSON_Value *v);
-
-/* Utility to assing string from JSON value */
-static
-int16_t bake_assign_json_string(char **ptr, JSON_Value *v) {
-    if (json_value_get_type(v) != JSONString &&
-        json_value_get_type(v) != JSONNull)
-    {
-        return -1;
-    }
-    if (*ptr) {
-        free(*ptr);
-    }
-    const char *str = json_value_get_string(v);
-    if (str) {
-        *ptr = strdup(str);
-    } else {
-        *ptr = NULL;
-    }
-    return 0;
-}
+extern ut_tls BAKE_DRIVER_KEY;
+extern ut_tls BAKE_FILELIST_KEY;
+extern ut_tls BAKE_PROJECT_KEY;
 
 static
-int16_t bake_project_func_locate(
-    bake_project *p,
-    const char *package_id, /* Different from p when parsing dependee config */
-    corto_buffer *buffer,
-    const char *argument)
+int16_t bake_validate_dep_array(
+    ut_ll array)
 {
-    const char *value = NULL;
-    if (!package_id) {
-        package_id = p->id;
-    }
-    if (!strcmp(argument, "package")) {
-        value = corto_locate(package_id, NULL, CORTO_LOCATE_PACKAGE);
-    } else if (!strcmp(argument, "include")) {
-        value = corto_locate(package_id, NULL, CORTO_LOCATE_INCLUDE);
-    } else if (!strcmp(argument, "etc")) {
-        value = corto_locate(package_id, NULL, CORTO_LOCATE_ETC);
-    } else if (!strcmp(argument, "env")) {
-        value = corto_locate(package_id, NULL, CORTO_LOCATE_ENV);
-    } else if (!strcmp(argument, "lib")) {
-        value = corto_locate(package_id, NULL, CORTO_LOCATE_LIB);
-    } else if (!strcmp(argument, "app")) {
-        value = corto_locate(package_id, NULL, CORTO_LOCATE_APP);
-    } else if (!strcmp(argument, "bin")) {
-        value = corto_locate(package_id, NULL, CORTO_LOCATE_BIN);
-    }
-    if (value) {
-        corto_buffer_appendstr(buffer, value);
-        return 0;
-    } else {
-        corto_throw("${locate %s} failed for project '%s'",
-            argument, package_id);
-        return -1;
-    }
-}
+    ut_iter it = ut_ll_iter(array);
+    while (ut_iter_hasNext(&it)) {
+        char *dep = ut_iter_next(&it);
 
-static
-int16_t bake_project_func_os(
-    bake_project *p,
-    const char *package_id,
-    corto_buffer *buffer,
-    const char *argument)
-{
-    if (corto_os_match(argument)) {
-        corto_buffer_appendstr(buffer, "1");
-    } else {
-        corto_buffer_appendstr(buffer, "0");
-    }
-    return 0;
-}
-
-static
-bool bake_language_is_cpp(
-    const char *str)
-{
-    if (!stricmp(str, "cpp") || !stricmp(str, "c++")) {
-        return true;
-    } else {
-        return false;
-    }
-}
-
-static
-bool bake_project_language_match(
-    const char *l1,
-    const char *l2)
-{
-    if (!l1 && !l2) {
-        return true;
-    }
-    if (!l1 || !l2) {
-        return false;
-    }
-
-    bool l1_is_cpp = bake_language_is_cpp(l1);
-    bool l2_is_cpp = bake_language_is_cpp(l2);
-
-    if (l1_is_cpp && l2_is_cpp) {
-        return true;
-    }
-
-    if (!stricmp(l1, l2)) {
-        return true;
-    }
-
-    return false;
-}
-
-static
-int16_t bake_project_func_language(
-  bake_project *p,
-  const char *package_id,
-  corto_buffer *buffer,
-  const char *argument)
-{
-    const char *language = p->language;
-    if (p->c4cpp) {
-        language = "cpp";
-    }
-
-    if (bake_project_language_match(language, argument)) {
-        corto_buffer_appendstr(buffer, "1");
-    } else {
-        corto_buffer_appendstr(buffer, "0");
-    }
-    return 0;
-}
-
-static
-int16_t bake_project_func_call(
-    bake_project *p,
-    const char *package_id,
-    corto_buffer *buffer,
-    const char *function,
-    const char *argument)
-{
-    if (!strcmp(function, "locate")) {
-        return bake_project_func_locate(p, package_id, buffer, argument);
-    } else if (!strcmp(function, "os") || !strcmp(function, "target")) {
-        return bake_project_func_os(p, package_id, buffer, argument);
-    } else if (!strcmp(function, "language") || !strcmp(function, "lang")) {
-        return bake_project_func_language(p, package_id, buffer, argument);
-    } else {
-        corto_throw("unknown function '%s'", function);
-        return -1;
-    }
-    return 0;
-}
-
-static
-char* bake_project_replace(
-    bake_project *p,
-    const char *package_id,
-    const char *input)
-{
-    const char *func = input, *next = NULL;
-    corto_buffer output = CORTO_BUFFER_INIT;
-    bool replaced = false;
-
-    while ((next = strchr(func, '$'))) {
-        replaced = true;
-
-        /* Add everything up until next $ */
-        corto_buffer_appendstrn(&output, (char*)func, next - func);
-
-        /* Check whether value is a function */
-        if (next[1] == '{') {
-            /* Find end of function identifier */
-            const char *start = &next[2], *end = strchr(next, ' ');
-            const char *func_end = strchr(end ? end : start, '}');
-            if (!end) {
-                end = func_end;
+        char *ptr, ch;
+        for (ptr = dep; (ch = *ptr); ptr ++) {
+            if (ch == '/') {
+                ut_warning("dependency '%s' contains deprecated '/' character",
+                    dep);
+                *ptr = '.';
             }
-            if (!end) {
-                corto_throw("no matching '}' in '%s'", input);
-                free (corto_buffer_str(&output));
-                goto error;
-            }
-
-            /* Obtain identifier & check if it contains invalid characters */
-            corto_id func_id = {0}, arg_id = {0};
-            const char *ptr;
-            for (ptr = start; ptr < end; ptr ++) {
-                if (!isalpha(*ptr) && *ptr != '_' && !isdigit(*ptr)) {
-                    corto_throw("invalid function identifier in '%s'", input);
-                    free (corto_buffer_str(&output));
-                    goto error;
-                }
-                func_id[ptr - start] = *ptr;
-            }
-            func_id[ptr - start] = '\0';
-
-            /* Obtain function argument (only one arg supported) */
-            if (*end == ' ') {
-                start = end + 1;
-                end = func_end;
-                for (ptr = start; ptr < end; ptr ++) {
-                    if (!isalpha(*ptr) && *ptr != '_' && !isdigit(*ptr)) {
-                        corto_throw("invalid function argument in '%s'", input);
-                        free (corto_buffer_str(&output));
-                        goto error;
-                    }
-                    arg_id[ptr - start] = *ptr;
-                }
-                arg_id[ptr - start] = '\0';
-            }
-
-            if (bake_project_func_call(
-                p,
-                package_id,
-                &output,
-                func_id,
-                arg_id))
-            {
-                free (corto_buffer_str(&output));
-                goto error;
-            }
-
-            func = func_end + 1;
-        } else {
-            /* Keep $ */
-            corto_buffer_appendstrn(&output, "$", 1);
-            func = next + 1;
         }
     }
 
-    /* Append remaining input */
-    if (func) {
-        corto_buffer_appendstr(&output, func);
-    }
-
-    if (replaced) {
-        char *str = corto_buffer_str(&output);
-        return str;
-    } else {
-        return corto_strdup(input);
-    }
-error:
-    return NULL;
+    return 0;
 }
 
 static
-void bake_clean_string_array(
-    corto_ll list)
-{
-    corto_iter it = corto_ll_iter(list);
-    while (corto_iter_hasNext(&it)) {
-        char *str = corto_iter_next(&it);
-        free(str);
-    }
-    corto_ll_free(list);
-}
-
-/* Utility to iterate over strings in a JSON array */
-static
-int16_t bake_append_json_array(
+int16_t bake_project_parse_value(
+    bake_config *config,
     bake_project *p,
     const char *project_id,
-    JSON_Value *v,
-    void(*action)(bake_project*,const char*))
+    JSON_Object *jo)
 {
-    if (json_value_get_type(v) == JSONArray) {
-        JSON_Array *a = json_value_get_array(v);
-        uint32_t i, count = json_array_get_count(a);
-        for (i = 0; i < count; i ++) {
-            JSON_Value *v = json_array_get_value(a, i);
-            const char *str = json_value_get_string(v);
-            if (str) {
-                action(p, str);
-            }
+    uint32_t i, count = json_object_get_count(jo);
+    bool error = false;
+
+    for (i = 0; i < count; i ++) {
+        JSON_Value *v = json_object_get_value_at(jo, i);
+        char *member = (char*)json_object_get_name(jo, i);
+
+        if (!strcmp(member, "public")) {
+           ut_try (bake_json_set_boolean(&p->public, member, v), NULL);
+        } else
+        if (!strcmp(member, "author")) {
+            ut_try (bake_json_set_string(&p->author, member, v), NULL);
+        } else
+        if (!strcmp(member, "organization")) {
+            ut_try (bake_json_set_string(&p->organization, member, v), NULL);
+        } else
+        if (!strcmp(member, "description")) {
+            ut_try (bake_json_set_string(&p->description, member, v), NULL);
+        } else
+        if (!strcmp(member, "version")) {
+            ut_try (bake_json_set_string(&p->version, member, v), NULL);
+        } else
+        if (!strcmp(member, "repository")) {
+            ut_try (bake_json_set_string(&p->repository, member, v), NULL);
+        } else
+        if (!strcmp(member, "license")) {
+            ut_try (bake_json_set_string(&p->license, member, v), NULL);
+        } else
+        if (!strcmp(member, "language")) {
+            ut_try (bake_json_set_string(&p->language, member, v), NULL);
+        } else
+        if (!strcmp(member, "use")) {
+            ut_try (bake_json_set_array(&p->use, member, v), NULL);
+            ut_try (bake_validate_dep_array(p->use), NULL);
+        } else
+        if (!strcmp(member, "use_private") || !strcmp(member, "use-private")) {
+            ut_try (bake_json_set_array(&p->use_private, member, v), NULL);
+        } else
+        if (!strcmp(member, "link")) {
+            ut_try (bake_json_set_array(&p->link, member, v), NULL);
+        } else
+        if (!strcmp(member, "sources")) {
+            ut_try (bake_json_set_array(&p->sources, member, v), NULL);
+        } else
+        if (!strcmp(member, "includes")) {
+            ut_try (bake_json_set_array(&p->includes, member, v), NULL);
+        } else
+        if (!strcmp(member, "keep_binary") || !strcmp(member, "keep-binary")) {
+            ut_try (bake_json_set_boolean(&p->keep_binary, member, v), NULL);
+        } else {
+            ut_warning("unknown member '%s' in project.json of '%s'", member, p->id);
         }
+    }
+
+    return 0;
+error:
+    return -1;
+}
+
+static
+int16_t bake_project_set(
+    bake_project *p,
+    const char *id,
+    const char *type)
+{
+    p->id = ut_strdup(id);
+
+    if (!strcmp(type, "application")) {
+        p->type = BAKE_APPLICATION;
+    } else if (!strcmp(type, "package")) {
+        p->type = BAKE_PACKAGE;
+    } else if (!strcmp(type, "tool")) {
+        p->type = BAKE_TOOL;
+    } else if (!strcmp(type, "executable")) {
+        p->type = BAKE_APPLICATION;
+        ut_warning("'executable' is deprecated, use 'application' instead for '%s'", p->id);
+    } else if (!strcmp(type, "library")) {
+        p->type = BAKE_PACKAGE;
+        ut_warning("'library' is deprecated, use 'package' instead for '%s'", p->id);
     } else {
+        ut_throw("project type '%s' is not valid for '%s'", type, p->id);
         goto error;
     }
-    return 0;
-error:
-    return -1;
-}
-
-
-bake_project_attr *bake_project_getattr(
-    bake_project *p,
-    const char *name)
-{
-    if (p->attributes) {
-        corto_iter it = corto_ll_iter(p->attributes);
-        while (corto_iter_hasNext(&it)) {
-            bake_project_attr *attr = corto_iter_next(&it);
-
-            if (!strcmp(attr->name, name)) {
-                return attr;
-            }
-        }
-    }
-
-    return NULL;
-}
-
-char *bake_project_getattr_tostr(
-    bake_project_attr *result)
-{
-    switch(result->kind) {
-    case BAKE_ATTR_STRING:
-        if (result->is.string) {
-            return corto_strdup(result->is.string);
-        } else {
-            return NULL;
-        }
-    case BAKE_ATTR_BOOLEAN:
-        if (result->is.boolean) {
-            return corto_strdup("true");
-        } else {
-            return corto_strdup("false");
-        }
-    case BAKE_ATTR_NUMBER:
-        return corto_asprintf("%f", result->is.number);
-    case BAKE_ATTR_ARRAY:
-        if (result->is.array) {
-            corto_buffer buf = CORTO_BUFFER_INIT;
-            corto_iter it = corto_ll_iter(result->is.array);
-            int count;
-            while (corto_iter_hasNext(&it)) {
-                bake_project_attr *attr = corto_iter_next(&it);
-                if (count) {
-                    corto_buffer_appendstr(&buf, " ");
-                }
-                char *str = bake_project_getattr_tostr(attr);
-                corto_buffer_appendstr(&buf, str);
-                free(str);
-                count ++;
-            }
-            return corto_buffer_str(&buf);
-        }
-    }
-
-    return NULL;
-}
-
-bool bake_project_getattr_tobool(
-    bake_project_attr *result)
-{
-    switch(result->kind) {
-    case BAKE_ATTR_STRING:
-        if (result->is.string) {
-            return strcmp(result->is.string, "false");
-        } else {
-            return false;
-        }
-    case BAKE_ATTR_BOOLEAN:
-        return result->is.boolean;
-    case BAKE_ATTR_NUMBER:
-        return result->is.number != 0;
-    case BAKE_ATTR_ARRAY:
-        return false;
-    }
-
-    return false;
-}
-
-char *bake_project_getattr_string_cb(const char *name) {
-    bake_project *p = corto_tls_get(BAKE_PROJECT_KEY);
-    corto_assert(p != NULL, "project::getattr called without project context");
-
-    bake_project_attr *result = bake_project_getattr(p, name);
-
-    if (result) {
-        return bake_project_getattr_tostr(result);
-    } else {
-        return "";
-    }
-}
-
-bool bake_project_getattr_bool_cb(const char *name) {
-    bake_project *p = corto_tls_get(BAKE_PROJECT_KEY);
-    corto_assert(p != NULL, "project::getattr called without project context");
-
-    bake_project_attr *result = bake_project_getattr(p, name);
-
-    if (result) {
-        return bake_project_getattr_tobool(result);
-    } else {
-        return false;
-    }
-}
-
-static
-bake_project_attr* bake_project_getattr_cb(const char *name) {
-    bake_project *p = corto_tls_get(BAKE_PROJECT_KEY);
-    corto_assert(p != NULL, "project::getattr called without project context");
-
-    return bake_project_getattr(p, name);
-}
-
-static
-bake_project_attr* bake_project_parseArray(
-    bake_project *p,
-    const char *package_id,
-    bake_project_attr *existing,
-    JSON_Array *a)
-{
-    uint32_t i, count = json_array_get_count(a);
-    bake_project_attr *result = existing;
-    if (!result) {
-        result = corto_calloc(sizeof(bake_project_attr));
-        result->kind = BAKE_ATTR_ARRAY;
-        result->is.array = corto_ll_new();
-    }
-
-    for (i = 0; i < count; i ++) {
-        JSON_Value *v = json_array_get_value(a, i);
-        bake_project_attr *attr = bake_project_parseValue(p, package_id, NULL, v);
-        if (attr) {
-            corto_ll_append(result->is.array, attr);
-        } else {
-            goto error;
-        }
-    }
-
-    return result;
-error:
-    /* TODO: cleanup memory */
-    return NULL;
-}
-
-static
-bake_project_attr* bake_project_parseString(
-    bake_project *p,
-    const char *package_id,
-    const char *str)
-{
-    bake_project_attr *result = corto_calloc(sizeof(bake_project_attr));
-    result->kind = BAKE_ATTR_STRING;
-
-    if (str) {
-        result->is.string = bake_project_replace(p, package_id, str);
-        if (!result->is.string) {
-            free(result);
-            return NULL;
-        }
-    } else {
-        result->is.string = NULL;
-    }
-
-    return result;
-}
-
-static
-bake_project_attr* bake_project_parseNumber(
-    double v)
-{
-    bake_project_attr *result = corto_calloc(sizeof(bake_project_attr));
-    result->kind = BAKE_ATTR_NUMBER;
-
-    result->is.number = v;
-
-    return result;
-}
-
-static
-bake_project_attr* bake_project_parseBoolean(
-    bool v)
-{
-    bake_project_attr *result = corto_calloc(sizeof(bake_project_attr));
-    result->kind = BAKE_ATTR_BOOLEAN;
-
-    result->is.boolean = v;
-
-    return result;
-}
-
-static
-bake_project_attr* bake_project_parseValue(
-    bake_project *p,
-    const char *package_id,
-    bake_project_attr *existing,
-    JSON_Value *v)
-{
-    bake_project_attr *attr = NULL;
-
-    JSON_Value_Type t = json_value_get_type(v);
-    switch(t) {
-    case JSONArray:
-        attr = bake_project_parseArray(p, package_id, existing, json_value_get_array(v));
-        break;
-    case JSONNull:
-    case JSONString:
-        attr = bake_project_parseString(p, package_id, json_value_get_string(v));
-        break;
-    case JSONNumber:
-        attr = bake_project_parseNumber(json_value_get_number(v));
-        break;
-    case JSONBoolean:
-        attr = bake_project_parseBoolean(json_value_get_boolean(v));
-        break;
-    case JSONObject:
-        /* Ignore objects- placeholder */
-        attr = corto_calloc(sizeof(bake_project_attr));
-        attr->kind = BAKE_ATTR_BOOLEAN;
-        break;
-    default:
-        break;
-    }
-
-    return attr;
-}
-
-static
-int16_t bake_project_parseMembers(
-    bake_project *p,
-    const char *package_id,
-    JSON_Object *jo)
-{
-    uint32_t i, count = json_object_get_count(jo);
-
-    if (!p->attributes) {
-        p->attributes = corto_ll_new();
-    }
-
-    for (i = 0; i < count; i ++) {
-        bake_project_attr *attr = NULL;
-        JSON_Value *v = json_object_get_value_at(jo, i);
-        const char *json_name = json_object_get_name(jo, i);
-        char *name = (char*)json_name;
-
-        if (name[0] == '$') {
-            /* If name contains function, parse it */
-            name = bake_project_replace(p, NULL, json_name);
-            if (!name) {
-                goto error;
-            }
-        }
-
-        if (!strcmp(name, "1") || !stricmp(name, "true")) {
-            JSON_Value *value = json_object_get_value_at(jo, i);
-            if (json_value_get_type(value) == JSONObject) {
-                JSON_Object *obj = json_value_get_object(value);
-                if (bake_project_parseMembers(p, NULL, obj)) {
-                    goto error;
-                }
-            }
-        } else
-
-        if (!strcmp(name, "0") || !stricmp(name, "false")) {
-            /* Ignore */
-        } else {
-
-            /* Check if attribute already exists */
-            attr = bake_project_getattr(p, name);
-
-            /* Add member to list of project attributes */
-            attr = bake_project_parseValue(p, package_id, attr, v);
-            if (attr) {
-                attr->name = corto_strdup(name);
-                corto_ll_append(p->attributes, attr);
-            } else {
-                corto_throw("failed to parse member '%s'", name);
-                goto error;
-            }
-
-            /* When parsing dependee config, allow dynamically adding packages */
-            if (!strcmp(name, "use")) {
-                if (bake_append_json_array(p, package_id, v, bake_project_use)) {
-                    corto_throw("expected array for 'use' attribute");
-                    goto error;
-                }
-            }
-        }
-    }
-
-    return 0;
-error:
-    return -1;
-}
-
-int16_t bake_project_parse_attributes(
-    bake_project *p)
-{
-    if (p->value_json) {
-        if (bake_project_parseMembers(p, p->id, p->value_json)) {
-            goto error;
-        }
-    }
 
     return 0;
 error:
@@ -620,226 +143,47 @@ error:
 }
 
 static
-int16_t bake_project_parse_config_value(
-    bake_project *p,
-    JSON_Object *jo)
+int16_t bake_project_parse(
+    bake_config *config,
+    bake_project *project)
 {
-    uint32_t i, count = json_object_get_count(jo);
+    char *file = ut_asprintf("%s/project.json", project->path);
 
-    for (i = 0; i < count; i ++) {
-        bake_project_attr *attr = NULL;
-        JSON_Value *v = json_object_get_value_at(jo, i);
-        const char *json_name = json_object_get_name(jo, i);
-        char *name = (char*)json_name;
-
-        if (name[0] == '$') {
-            /* If name contains function, parse it */
-            name = bake_project_replace(p, NULL, json_name);
-            if (!name) {
-                goto error;
-            }
-        }
-
-        if (!strcmp(name, "1") || !stricmp(name, "true")) {
-            JSON_Value *value = json_object_get_value_at(jo, i);
-            if (json_value_get_type(value) == JSONObject) {
-                JSON_Object *obj = json_value_get_object(value);
-                if (bake_project_parse_config_value(p, obj)) {
-                    goto error;
-                }
-            }
-        } else
-
-        if (!strcmp(name, "0") || !stricmp(name, "false")) {
-            /* Ignore */
-        } else
-
-        if (!strcmp(name, "language")) {
-            if (bake_assign_json_string(&p->language, v)) {
-                corto_throw("expected string for 'language' attribute");
-                goto error;
-            }
-        } else
-
-        if (!strcmp(name, "c4cpp")) {
-            if (json_value_get_type(v) == JSONBoolean) {
-                p->c4cpp = json_value_get_boolean(v);
-            } else {
-                corto_throw("expected boolean for 'c4cpp' attribute");
-                goto error;
-            }
-        } else
-
-        if (!strcmp(name, "version")) {
-            if (bake_assign_json_string(&p->version, v)) {
-                corto_throw("expected string for 'version' attribute");
-                goto error;
-            }
-        } else
-
-        if (!strcmp(name, "managed")) {
-            if (json_value_get_type(v) == JSONBoolean) {
-                p->managed = json_value_get_boolean(v);
-            } else {
-                corto_throw("expected boolean for 'managed' attribute");
-                goto error;
-            }
-        } else
-
-        if (!strcmp(name, "public")) {
-            if (json_value_get_type(v) == JSONBoolean) {
-                p->public = json_value_get_boolean(v);
-            } else {
-                corto_throw("expected string for 'public' attribute");
-                goto error;
-            }
-        } else
-
-        if (!strcmp(name, "dependee")) {
-            /* Dependee contain build instructions for dependee projects */
-            p->dependee_json = corto_strdup(json_serialize_to_string(v));
-        } else
-
-        if (!strcmp(name, "use_generated_api")) {
-            if (json_value_get_type(v) == JSONBoolean) {
-                p->use_generated_api = json_value_get_boolean(v);
-            } else {
-                corto_throw("expected boolean for 'use_generated_api' attribute");
-                goto error;
-            }
-        } else
-
-        if (!strcmp(name, "link")) {
-            if (bake_append_json_array(p, NULL, v, bake_project_link)) {
-                corto_throw("expected array for 'link' attribute");
-                goto error;
-            }
-        } else
-
-        if (!strcmp(name, "use")) {
-            if (bake_append_json_array(p, NULL, v, bake_project_use)) {
-                corto_throw("expected array for 'use' attribute");
-                goto error;
-            }
-        } else
-
-        if (!strcmp(name, "use_private")) {
-            if (bake_append_json_array(p, NULL, v, bake_project_use_private)) {
-                corto_throw("expected array for 'use_private' attribute");
-                goto error;
-            }
-        } else
-
-        if (!strcmp(name, "sources")) {
-            if (bake_append_json_array(p, NULL, v, bake_project_addSource)) {
-                corto_throw("expected array for 'sources' attribute");
-                goto error;
-            }
-        } else
-
-        if (!strcmp(name, "includes")) {
-            if (bake_append_json_array(p, NULL, v, bake_project_addInclude)) {
-                corto_throw("expected array for 'includes' attribute");
-                goto error;
-            }
-        } else
-
-        if (!strcmp(name, "keep_binary")) {
-            if (json_value_get_type(v) == JSONBoolean) {
-                p->keep_binary = json_value_get_boolean(v);
-            } else {
-                corto_throw("expected boolean for 'keep_binary' attribute");
-                goto error;
-            }
-        }
-
-        if (name != json_name) {
-            free(name);
-        }
-    }
-
-    return 0;
-error:
-    return -1;
-}
-
-/* Parse project.json if available */
-static
-int16_t bake_project_parse_config(
-    bake_project *p)
-{
-    const char *file = "project.json";
-
-    if (corto_file_test("project.json")) {
-        JSON_Value *j = json_parse_file(file);
+    if (ut_file_test(file) == 1) {
+        JSON_Value *j = json_parse_file_with_comments(file);
         if (!j) {
-            corto_throw("failed to parse '%s'", file);
+            ut_throw("failed to parse '%s'", file);
             goto error;
         }
-
-        p->json = j;
 
         JSON_Object *jo = json_value_get_object(j);
         if (!jo) {
-            corto_throw("failed to parse '%s' (expected object)", file);
+            ut_throw("failed to parse '%s' (expected object)", file);
             goto error;
         }
 
-        const char *j_id_member = json_object_get_string(jo, "id");
-        if (!j_id_member) {
-            corto_throw("failed to parse '%s': missing 'id' member", file);
+        const char *j_id = json_object_get_string(jo, "id");
+        if (!j_id) {
+            ut_throw("failed to parse '%s': missing 'id'", file);
             goto error;
         }
 
-        p->id = strdup(j_id_member);
-        char *ptr, ch;
-        for (ptr = p->id; (ch = *ptr); ptr ++) {
-            if (ch == '.') *ptr = '/';
+        const char *j_type = json_object_get_string(jo, "type");
+        if (!j_type) {
+            j_type = "package";
         }
 
-        const char *j_type_member = json_object_get_string(jo, "type");
-        if (!j_type_member) {
-            corto_throw("failed to parse '%s': missing 'type' member", file);
-            goto error;
+        ut_try (bake_project_set(project, j_id, j_type), NULL);
+
+        JSON_Object *j_value = json_object_get_object(jo, "value");
+        if (j_value) {
+            ut_try (bake_project_parse_value(config, project, project->id, j_value), NULL);
         }
 
-        if (!strcmp(j_type_member, "application")) {
-            p->kind = BAKE_APPLICATION;
-        } else if (!strcmp(j_type_member, "package")) {
-            p->kind = BAKE_PACKAGE;
-        } else if (!strcmp(j_type_member, "tool")) {
-            p->kind = BAKE_TOOL;
-        } else if (!strcmp(j_type_member, "library")) {
-            p->kind = BAKE_PACKAGE;
-            p->managed = false;
-        } else if (!strcmp(j_type_member, "executable")) {
-            p->kind = BAKE_APPLICATION;
-            p->managed = false;
-        }
-
-        JSON_Value *j_value_member = json_object_get_value(jo, "value");
-        if (j_value_member) {
-            JSON_Object *jvo = json_value_get_object(j_value_member);
-            if (!jvo) {
-                corto_throw(
-                    "failed to parse '%s': value member must be an object",
-                    file);
-                goto error;
-            }
-
-            p->value_json = jvo;
-
-            /* Parse configuration required to start building project */
-            if (bake_project_parse_config_value(p, jvo)) {
-                goto error;
-            }
-        } else {
-            /* Project has no attributes, using default values */
-        }
+        project->json = jo;
     } else {
-        /* If there is no project.json, bake can likely not detect if the
-         * project was rebuilt or not, so assuming yes. */
-        p->freshly_baked = true;
+        ut_throw("could not find file '%s'", file);
+        goto error;
     }
 
     return 0;
@@ -848,66 +192,144 @@ error:
 }
 
 static
-void bake_project_clean_cb(const char *file) {
-    bake_project *p = corto_tls_get(BAKE_PROJECT_KEY);
-    corto_ll_append(p->files_to_clean, corto_strdup(file));
-}
-
-static
-void bake_project_add_build_dependency_cb(const char *package) {
-    bake_project *p = corto_tls_get(BAKE_PROJECT_KEY);
-    corto_ll_append(p->use_build, corto_strdup(package));
-}
-
-static
-char *bake_project_modelFile(
-    bake_project *p)
+bake_project_driver* bake_project_get_driver(
+    bake_project *project,
+    const char *driver_id)
 {
-    char *result = NULL;
-    corto_iter it;
-
-    if (corto_dir_iter(".", NULL, &it)) {
-        p->error = true;
-        goto error;
-    }
-
-    while (corto_iter_hasNext(&it)) {
-        char *file = corto_iter_next(&it);
-        if (!strncmp(file, "model.", strlen("model."))) {
-            result = corto_strdup(file);
-
-            /* Release iterator resources when prematurely quitting iteration */
-            corto_iter_release(&it);
-            break;
+    ut_iter it = ut_ll_iter(project->drivers);
+    while (ut_iter_hasNext(&it)) {
+        bake_project_driver *driver = ut_iter_next(&it);
+        if (!strcmp(driver->driver->id, driver_id)) {
+            return driver;
         }
     }
 
-    return result;
-error:
     return NULL;
 }
 
-int16_t bake_project_loadDependeeConfig(
-    bake_project *p,
-    const char *package_id,
+static
+int bake_project_load_driver(
+    bake_project *project,
+    const char *driver_id,
+    JSON_Object *config)
+{
+    bake_project_driver *project_driver =
+        bake_project_get_driver(project, driver_id);
+
+    if (!project_driver) {
+        bake_driver *driver = bake_driver_get(driver_id);
+        if (!driver) {
+            goto error;
+        }
+
+        project_driver = malloc(sizeof(bake_project_driver));
+        project_driver->id = driver->id;
+        project_driver->driver = driver;
+        project_driver->json = NULL;
+        project_driver->attributes = NULL;
+        ut_ll_append(project->drivers, project_driver);
+    }
+
+    if (config) {
+        project_driver->json = config;
+    }
+
+    return 0;
+error:
+    return -1;
+}
+
+static
+int16_t bake_project_load_dependee_object(
+    bake_config *config,
+    bake_project *project,
+    const char *project_id,
+    JSON_Object *jo)
+{
+    uint32_t i, count = json_object_get_count(jo);
+
+    for (i = 0; i < count; i ++) {
+        const char *expr = json_object_get_name(jo, i);
+
+        if (!strcmp(expr, "id") || !strcmp(expr, "type")) {
+            /* Ignore */
+            continue;
+        }
+
+        char *member = (char*)expr;
+        member = bake_attr_replace(config, project, project_id, expr);
+        if (!member) {
+            goto error;
+        }
+
+        if (!strcmp(member, "1")) {
+            JSON_Value *value = json_object_get_value_at(jo, i);
+            if (json_value_get_type(value) == JSONObject) {
+                JSON_Object *obj = json_value_get_object(value);
+                ut_try (!bake_project_load_dependee_object(
+                    config, project, project_id, obj), NULL);
+            } else {
+                ut_throw("JSON object expected for expression '%s'", expr);
+                goto error;
+            }
+        } else if (!strcmp(member, "0")) {
+            /* Ignore */
+        } else {
+            JSON_Value *value = json_object_get_value_at(jo, i);
+            JSON_Object *obj = json_value_get_object(value);
+
+            if (!strcmp(member, "value")) {
+                ut_try (
+                  bake_project_parse_value(config, project, project_id, obj),
+                  NULL);
+            } else {
+                bake_project_driver *driver = bake_project_get_driver(
+                    project, member);
+                if (!driver) {
+                    ut_try(
+                      bake_project_load_driver(project, member, obj), NULL);
+                } else {
+                    driver->attributes = bake_attrs_parse(
+                        config, project, project_id, obj, driver->attributes);
+                    if (!driver->attributes) {
+                        ut_throw(
+                            "failed to parse dependee config for driver '%s'",
+                            member);
+                        goto error;
+                    }
+                }
+            }
+        }
+
+        free(member);
+    }
+
+    return 0;
+error:
+    return -1;
+}
+
+static
+int16_t bake_project_load_dependee_config(
+    bake_config *config,
+    bake_project *project,
+    const char *project_id,
     const char *file)
 {
-    JSON_Value *j = json_parse_file(file);
+    JSON_Value *j = json_parse_file_with_comments(file);
     if (!j) {
-        corto_throw("failed to parse '%s'", file);
+        ut_throw("failed to parse '%s'", file);
         goto error;
     }
 
     JSON_Object *jo = json_value_get_object(j);
     if (!jo) {
-        corto_throw("failed to parse '%s' (expected object)", file);
+        ut_throw("failed to parse '%s' (expected object)", file);
         goto error;
     }
 
-    if (bake_project_parseMembers(p, package_id, jo)) {
-        corto_throw(NULL);
-        goto error;
-    }
+    ut_try( bake_project_load_dependee_object(config, project, project_id, jo),
+        NULL);
 
     return 0;
 error:
@@ -916,45 +338,754 @@ error:
 
 static
 int16_t bake_project_add_dependee_config(
-    bake_project *p,
-    const char *dep)
+    bake_config *config,
+    bake_project *project,
+    const char *dependency)
 {
-    /* Skip generated packages */
-    if (bake_project_is_generated_package(p, dep)) {
-        return 0;
-    }
+    ut_locate_reset(dependency);
 
-    const char *libpath = corto_locate(dep, NULL, CORTO_LOCATE_PACKAGE);
-    if (!libpath) {
-        corto_throw("failed to locate project path for dependency '%s'", dep);
-        goto error;
-    }
-
-    /* Check if dependency has a dependee file with build instructions */
-    char *dependee_file = corto_asprintf("%s/dependee.json", libpath);
-    if (corto_file_test(dependee_file)) {
-        if (bake_project_loadDependeeConfig(p, dep, dependee_file)) {
-            corto_throw(NULL);
-            goto error;
+    const char *libpath = ut_locate(dependency, NULL, UT_LOCATE_PROJECT);
+    if (libpath) {
+        /* Check if dependency has a dependee file with build instructions */
+        char *file = ut_asprintf("%s/dependee.json", libpath);
+        if (ut_file_test(file)) {
+            ut_try (
+              bake_project_load_dependee_config(config, project, dependency, file),
+              NULL);
         }
-    }
 
-    free(dependee_file);
+        free(file);
+    } else {
+        /* If dependency cannot be found at this time, it is either a missing
+         * dependency (in which case an error will be thrown) or it is a project
+         * that is yet to be generated. In the latter case, ignore it for the
+         * dependee configuration as project configuration needs to be stable at
+         * this stage for bake's dependency resolver to work correctly */
+    }
 
     return 0;
 error:
     return -1;
 }
 
-int16_t bake_project_parse_dependee_attributes(
+static
+int16_t bake_project_init_language(
+    bake_config *config,
+    bake_project *project)
+{
+    if (!project->language) {
+        project->language = ut_strdup("c");
+    }
+
+    if (!project->version) {
+        project->version = ut_strdup("0.0.0");
+    }
+
+    if (project->language && !strcmp(project->language, "c++")) {
+        free(project->language);
+        project->language = ut_strdup("cpp");
+    }
+
+    if (project->language && !strcmp(project->language, "none")) {
+        free(project->language);
+        project->language = NULL;
+    }
+
+    if (project->language) {
+        char *driver_id = ut_asprintf("lang.%s", project->language);
+        ut_try( bake_project_load_driver(
+            project,
+            driver_id,
+            NULL),
+              "failed to load driver for language '%s'", project->language);
+        free(driver_id);
+
+        bake_project_driver *driver = ut_ll_get(project->drivers, 0);
+        project->language_driver = driver;
+
+        /* Initialize configuration for language driver */
+        project->language_driver->attributes = ut_ll_new();
+        ut_try(
+          bake_driver__init(project->language_driver->driver, config, project),
+          NULL);
+    }
+
+    return 0;
+error:
+    return -1;
+}
+
+void bake_project_init_artefact(
+    bake_config *config,
+    bake_project *project)
+{
+    if (project->artefact) {
+        project->artefact_path = ut_asprintf(
+            "%s/bin/%s-%s", project->path, UT_PLATFORM_STRING,
+            config->configuration);
+
+        project->artefact_file = ut_asprintf(
+            "%s/%s", project->artefact_path, project->artefact);
+    }
+}
+
+/* -- Public API -- */
+
+int16_t bake_project_init(
+    bake_config *config,
+    bake_project *project)
+{
+    if (!isalpha(project->id[0])) {
+        ut_error("project id '%s' is invalid (should start with a letter)",
+            project->id);
+        goto error;
+    }
+
+    project->id_underscore = ut_strdup(project->id);
+    project->id_dash = ut_strdup(project->id);
+
+    char *ptr;
+    char ch;
+    for (ptr = project->id; (ch = *ptr); ptr ++) {
+        if (ch == '/') {
+            ut_warning("project id '%s' contains deprecated '/' character",
+                project->id);
+            *ptr = '.';
+            ch = '.';
+        }
+
+        if (ch == '.') {
+            project->id_underscore[ptr - project->id] = '_';
+            project->id_dash[ptr - project->id] = '-';
+
+        } else if (!isalpha(ch) && !isdigit(ch) && ch != '_') {
+            ut_error("project id '%s' contains invalid character ('%c')",
+                project->id, ch);
+            goto error;
+        }
+    }
+
+    project->id_short = strrchr(project->id, '.');
+    if (!project->id_short) {
+        project->id_short = project->id;
+    } else {
+        project->id_short ++;
+    }
+
+    if (!project->sources) {
+        project->sources = ut_ll_new();
+    }
+    if (!project->includes) {
+        project->includes = ut_ll_new();
+    }
+    if (!project->drivers) {
+        project->drivers = ut_ll_new();
+    }
+    if (!project->use) {
+        project->use = ut_ll_new();
+    }
+    if (!project->use_private) {
+        project->use_private = ut_ll_new();
+    }
+    if (!project->use_build) {
+        project->use_build = ut_ll_new();
+    }
+    if (!project->link) {
+        project->link = ut_ll_new();
+    }
+    if (!project->files_to_clean) {
+        project->files_to_clean = ut_ll_new();
+    }
+
+    /* If 'src' and 'includes' weren't set, use defaults */
+    if (!ut_ll_count(project->sources)) {
+        ut_ll_append(project->sources, ut_strdup("src"));
+    }
+    if (!ut_ll_count(project->includes)) {
+        ut_ll_append(project->includes, ut_strdup("include"));
+    }
+
+    ut_try (bake_project_init_language(config, project), NULL);
+
+    /* Project artefact could have been provided manually on command line */
+    if (project->artefact) {
+        bake_project_init_artefact(config, project);
+    }
+
+    project->bin_path = ut_asprintf(
+        "%s/bin", project->path);
+
+    project->cache_path = ut_asprintf(
+        "%s/.bake_cache", project->path);
+
+    if (project->path[0] == '/') {
+        project->fullpath = ut_strdup(project->path);
+    } else if (strcmp(project->path, ".")) {
+        project->fullpath = ut_asprintf("%s/%s", ut_cwd(), project->path);
+    } else {
+        project->fullpath = ut_strdup(ut_cwd());
+    }
+
+    return 0;
+error:
+    return -1;
+}
+
+static
+int bake_project_load_drivers(
+    bake_project *project)
+{
+    uint32_t i, count = json_object_get_count(project->json);
+    bool error = false;
+
+    for (i = 0; i < count; i ++) {
+        const char *member = json_object_get_name(project->json, i);
+
+        if (!strcmp(member, "id") || !strcmp(member, "type") ||
+            !strcmp(member, "value"))
+            continue;
+
+        JSON_Value *value = json_object_get_value_at(project->json, i);
+        JSON_Object *obj = json_value_get_object(value);
+
+        if (strcmp(member, "dependee")) {
+            ut_try( bake_project_load_driver(project, member, obj), NULL);
+        } else {
+            project->dependee_json = json_serialize_to_string(value);
+        }
+    }
+
+    return 0;
+error:
+    return -1;
+}
+
+bake_project* bake_project_new(
+    const char *path,
+    bake_config *config)
+{
+    bake_project *result = ut_calloc(sizeof (bake_project));
+    if (!path && !config) {
+        return result;
+    }
+
+    result->path = path ? strdup(path) : NULL;
+    result->public = true;
+
+    /* Parse project.json if available */
+    if (path) {
+        ut_try (
+            bake_project_parse(config, result),
+            "failed to parse '%s/project.json'",
+            path);
+            
+        ut_try( bake_project_init(config, result), NULL);
+    }
+
+    /* Load drivers */
+    ut_try (bake_project_load_drivers(result), NULL);
+
+    return result;
+error:
+    return NULL;
+}
+
+void bake_project_free(
+    bake_project *project)
+{
+    bake_attr_free_string_array(project->use);
+    bake_attr_free_string_array(project->use_private);
+    bake_attr_free_string_array(project->use_build);
+    bake_attr_free_string_array(project->sources);
+    bake_attr_free_string_array(project->includes);
+    bake_attr_free_string_array(project->link);
+
+    ut_iter it = ut_ll_iter(project->drivers);
+    while (ut_iter_hasNext(&it)) {
+        bake_project_driver *driver = ut_iter_next(&it);
+        bake_attr_free_attr_array(driver->attributes);
+    }
+
+    free(project->id);
+    free(project->id_underscore);
+    free(project->id_dash);
+}
+
+bake_attr* bake_project_get_attr(
+    bake_project *project,
+    const char *driver_id,
+    const char *attr)
+{
+    bake_project_driver* driver = bake_project_get_driver(project, driver_id);
+    if (driver && driver->attributes) {
+        return bake_attr_get(driver->attributes, attr);
+    } else {
+        return NULL;
+    }
+}
+
+static
+bake_attr* bake_project_set_attr(
+    bake_config *config,
+    bake_project *project,
+    const char *driver_id,
+    const char *attr,
+    JSON_Value *value)
+{
+    bake_project_driver* driver = bake_project_get_driver(project, driver_id);
+
+    if (driver) {
+        ut_try( bake_attr_add(
+          config, project, project->id, driver->attributes, attr, value), NULL);
+
+        return bake_attr_get(driver->attributes, attr);
+    } else {
+        project->error = true;
+        ut_error("failed to set attribute for unknown driver '%s'", driver_id);
+    }
+
+error:
+    return NULL;
+}
+
+bake_attr* bake_project_set_attr_array(
+    bake_config *config,
+    bake_project *project,
+    const char *driver_id,
+    const char *name,
+    const char *value)
+{
+    bake_attr *attr = bake_project_get_attr(project, driver_id, name);
+
+    if (!attr) {
+        attr = ut_calloc(sizeof(bake_attr));
+        attr->name = ut_strdup(name);
+        attr->kind = BAKE_ARRAY;
+        attr->is.array = ut_ll_new();
+    }
+
+    if (attr->kind != BAKE_ARRAY) {
+        ut_throw("attribute '%s' is not of type array", name);
+        return NULL;
+    }
+
+    /* Check if value isn't already added */
+    ut_iter it = ut_ll_iter(attr->is.array);
+    while (ut_iter_hasNext(&it)) {
+        const char *elem = ut_iter_next(&it);
+        if (!strcmp(elem, value)) {
+            return attr;
+        }
+    }
+
+    ut_ll_append(attr->is.array, ut_strdup(value));
+
+    return attr;
+}
+
+bake_attr* bake_project_set_attr_string(
+    bake_config *config,
+    bake_project *project,
+    const char *driver_id,
+    const char *attr,
+    const char *value)
+{
+    return bake_project_set_attr(
+        config, project, driver_id, attr, json_value_init_string(value));
+}
+
+bake_attr* bake_project_set_attr_bool(
+    bake_config *config,
+    bake_project *project,
+    const char *driver_id,
+    const char *attr,
+    bool value)
+{
+    return bake_project_set_attr(
+        config, project, driver_id, attr, json_value_init_boolean(value));
+}
+
+int bake_project_parse_driver_config(
+    bake_config *config,
+    bake_project *project)
+{
+    ut_iter it = ut_ll_iter(project->drivers);
+
+    /* Parse attributes for drivers in project configuration */
+    while (ut_iter_hasNext(&it)) {
+        bake_project_driver *driver = ut_iter_next(&it);
+        if (!driver->json) {
+            continue;
+        }
+
+        driver->attributes = bake_attrs_parse(
+            config, project, project->id, driver->json, NULL);
+        if (!driver->attributes) {
+            goto error;
+        }
+    }
+
+    /* Now that all information is parsed, we can load the artefact name */
+    if (project->language_driver && !project->artefact) {
+        project->artefact = bake_driver__artefact(
+            project->language_driver->driver, config, project);
+
+        bake_project_init_artefact(config, project);
+    }
+
+    return 0;
+error:
+    return -1;
+}
+
+int bake_project_init_drivers(
+    bake_config *config,
+    bake_project *project)
+{
+    ut_iter it = ut_ll_iter(project->drivers);
+
+    /* Run driver initialization function */
+    while (ut_iter_hasNext(&it)) {
+        bake_project_driver *driver = ut_iter_next(&it);
+        ut_try(
+            bake_driver__init(driver->driver, config, project),
+            NULL);
+    }
+
+    return 0;
+error:
+    return -1;
+}
+
+int16_t bake_project_parse_dependee_config(
+    bake_config *config,
+    bake_project *project)
+{
+    /* Add dependencies to link list */
+    if (project->use) {
+        ut_iter it = ut_ll_iter(project->use);
+        while (ut_iter_hasNext(&it)) {
+            char *dep = ut_iter_next(&it);
+            if (bake_project_add_dependee_config(config, project, dep)) {
+                goto error;
+            }
+        }
+    }
+
+    /* Add private dependencies to link list */
+    if (project->use_private) {
+        ut_iter it = ut_ll_iter(project->use_private);
+        while (ut_iter_hasNext(&it)) {
+            char *dep = ut_iter_next(&it);
+            if (bake_project_add_dependee_config(config, project, dep)) {
+                goto error;
+            }
+        }
+    }
+
+    return 0;
+error:
+    return -1;
+}
+
+static
+int16_t bake_check_dependency(
+    bake_config *config,
+    bake_project *p,
+    const char *dependency,
+    uint32_t artefact_modified,
+    bool private)
+{
+    ut_locate_reset(dependency);
+    const char *path = ut_locate(dependency, NULL, UT_LOCATE_PROJECT);
+    bool dep_has_lib = false;
+
+    if (path) {
+        bake_project *dep = bake_project_new(path, config);
+        if (dep) {
+            if (dep->type != BAKE_PACKAGE) {
+                ut_throw("invalid dependency '%s', not a package", dependency);
+                goto error;
+            }
+            if (dep->language) {
+                dep_has_lib = true;
+            }
+            bake_project_free(dep);
+        } else {
+            ut_throw("failed to create project for path '%s'", path);
+            goto error;
+        }
+    }
+
+    if (!dep_has_lib) {
+        return 0;
+    }
+
+    const char *lib = ut_locate(dependency, NULL, UT_LOCATE_BIN);
+    if (!lib) {
+        ut_throw("binary for dependency '%s' not found", dependency);
+        goto error;
+    }
+
+    time_t dep_modified = ut_lastmodified(lib);
+
+    if (!artefact_modified || dep_modified <= artefact_modified) {
+        const char *fmt = private
+            ? "#[grey]use %s => %s (modified=%d private)"
+            : "#[grey]use %s => %s (modified=%d)"
+            ;
+        ut_ok(fmt, dependency, lib, dep_modified);
+    } else {
+        p->artefact_outdated = true;
+        const char *fmt = private
+            ? "#[grey]use %s => %s (modified=%d, changed, private)"
+            : "#[grey]use %s => %s (modified=%d, changed)"
+            ;
+        ut_ok(fmt, dependency, lib, dep_modified);
+    }
+
+proceed:
+    return 0;
+error:
+    return -1;
+}
+
+int16_t bake_project_check_dependencies(
+    bake_config *config,
+    bake_project *project)
+{
+    time_t artefact_modified = 0;
+
+    if (!project->language) {
+        return 0;
+    }
+
+    char *artefact_full = project->artefact_file;
+    if  (ut_file_test(artefact_full)) {
+        artefact_modified = ut_lastmodified(artefact_full);
+    }
+
+    if (project->use) {
+        ut_iter it = ut_ll_iter(project->use);
+        while (ut_iter_hasNext(&it)) {
+            char *package = ut_iter_next(&it);
+            if (bake_check_dependency(
+                config, project, package, artefact_modified, false))
+            {
+                goto error;
+            }
+        }
+    }
+
+    if (project->use_private) {
+        ut_iter it = ut_ll_iter(project->use_private);
+        while (ut_iter_hasNext(&it)) {
+            char *package = ut_iter_next(&it);
+            if (bake_check_dependency(
+                config, project, package, artefact_modified, true))
+            {
+                goto error;
+            }
+        }
+    }
+
+    if (project->artefact_outdated) {
+        if (ut_rm(project->artefact_file)) {
+            goto error;
+        }
+    }
+
+    return 0;
+error:
+    return -1;
+}
+
+int16_t bake_project_generate(
+    bake_config *config,
+    bake_project *project)
+{
+    /* Invoke generate action for all drivers */
+    ut_iter it = ut_ll_iter(project->drivers);
+    while (ut_iter_hasNext(&it)) {
+        bake_project_driver *driver = ut_iter_next(&it);
+        ut_try( bake_driver__generate(driver->driver, config, project), NULL);
+    }
+
+    /* Evaluate GENERATED-SOURCES nodes if there are any */
+    it = ut_ll_iter(project->drivers);
+    while (ut_iter_hasNext(&it)) {
+        bake_project_driver *driver = ut_iter_next(&it);
+        bake_node *node = bake_node_find(driver->driver, "GENERATED-SOURCES");
+        if (!node) {
+            continue;
+        }
+
+        bake_driver *old_driver = ut_tls_get(BAKE_DRIVER_KEY);
+        ut_tls_set(BAKE_DRIVER_KEY, driver->driver);
+        bake_project *old_project = ut_tls_get(BAKE_PROJECT_KEY);
+        ut_tls_set(BAKE_PROJECT_KEY, project);
+
+        if (bake_node_eval(driver->driver, node, project, config, NULL, NULL)) {
+            ut_throw("failed to build rule 'GENERATED-SOURCES'");
+            goto error;
+        }
+
+        ut_tls_set(BAKE_DRIVER_KEY, old_driver);
+        ut_tls_set(BAKE_PROJECT_KEY, old_project);
+    }
+
+    return 0;
+error:
+    return -1;
+}
+
+static
+int16_t bake_project_resolve_links(
+    bake_config *config,
+    bake_project *project)
+{
+    ut_ll resolved = ut_ll_new();
+    ut_iter it = ut_ll_iter(project->link);
+
+    while (ut_iter_hasNext(&it)) {
+        char *link = ut_iter_next(&it);
+        char *parsed = bake_attr_replace(config, project, NULL, link);
+        if (!parsed) {
+            goto error;
+        }
+
+        char *lib = bake_driver__link_to_lib(
+            project->language_driver->driver, config, project, parsed);
+        if (!lib) {
+            ut_throw("cannot find library '%s' in 'link' attribute", parsed);
+            goto error;
+        }
+
+        ut_ll_append(resolved, lib);
+    }
+
+    bake_attr_free_string_array(project->link);
+    project->link = resolved;
+
+    return 0;
+error:
+    bake_attr_free_string_array(resolved);
+    return -1;
+}
+
+static
+void bake_project_link_cleanup(
+    ut_ll link)
+{
+    ut_iter it = ut_ll_iter(link);
+    while (ut_iter_hasNext(&it)) {
+        char *link = ut_iter_next(&it);
+        free(link);
+    }
+    ut_ll_free(link);
+}
+
+static
+ut_ll bake_project_copy_libs(
+    bake_project *p,
+    const char *path)
+{
+    ut_ll link_list = ut_ll_new();
+
+    ut_iter it = ut_ll_iter(p->link);
+    while (ut_iter_hasNext(&it)) {
+        char *link = ut_iter_next(&it);
+
+        char *link_lib = strrchr(link, '/');
+        if (!link_lib) {
+            link_lib = link;
+        } else {
+            link_lib ++;
+        }
+
+        if (!strncmp(link_lib, "lib", 3)) {
+            link_lib += 3;
+        }
+
+        char *target_link = ut_asprintf("%s/lib%s_%s",
+            path, p->id_underscore, link_lib);
+
+        /* Copy to path */
+        if (ut_cp(link, target_link)) {
+            ut_throw("failed to library in link '%s'", link);
+            goto error;
+        }
+
+        free(target_link);
+
+        /* Create library name for linking */
+        char *link_name = ut_asprintf("%s_%s", p->id_underscore, link_lib);
+
+        /* Strip extension */
+        char *ext = strrchr(link_name, '.');
+        if (ext) {
+            ext[0] = '\0';
+        }
+
+        ut_ll_append(link_list, link_name);
+    }
+
+    return link_list;
+error:
+    bake_project_link_cleanup(link_list);
+    return NULL;
+}
+
+static
+int16_t bake_project_add_dependency(
+    bake_project *p,
+    const char *dep)
+{
+   /* Reset locate cache. It is possible that this dependency was looked up
+    * before when it did not exist yet, but since then has been created (which
+    * would have to be through a code generation process). */
+
+    ut_locate_reset(dep);
+
+    const char *libpath = ut_locate(dep, NULL, UT_LOCATE_PROJECT);
+    if (!libpath) {
+        ut_throw(
+            "failed to locate library path for dependency '%s'", dep);
+        goto error;
+    }
+
+    const char *lib = ut_locate(dep, NULL, UT_LOCATE_LIB);
+    if (lib) {
+        char *dep_lib = ut_strdup(dep);
+        char *ptr, ch;
+        for (ptr = dep_lib; (ch = *ptr); ptr ++) {
+            if (ch == '/' || ch == '.') {
+                ptr[0] = '_';
+            }
+        }
+
+        ut_ll_append(p->link, dep_lib);
+    } else {
+        /* A dependency may not have a library that can be linked, but could
+         * only contain build instructions */
+        ut_catch();
+    }
+
+    return 0;
+error:
+    return -1;
+}
+
+static
+int16_t bake_project_add_dependencies(
     bake_project *p)
 {
     /* Add dependencies to link list */
     if (p->use) {
-        corto_iter it = corto_ll_iter(p->use);
-        while (corto_iter_hasNext(&it)) {
-            char *dep = corto_iter_next(&it);
-            if (bake_project_add_dependee_config(p, dep)) {
+        ut_iter it = ut_ll_iter(p->use);
+        while (ut_iter_hasNext(&it)) {
+            char *dep = ut_iter_next(&it);
+            if (bake_project_add_dependency(p, dep)) {
                 goto error;
             }
         }
@@ -962,10 +1093,10 @@ int16_t bake_project_parse_dependee_attributes(
 
     /* Add private dependencies to link list */
     if (p->use_private) {
-        corto_iter it = corto_ll_iter(p->use_private);
-        while (corto_iter_hasNext(&it)) {
-            char *dep = corto_iter_next(&it);
-            if (bake_project_add_dependee_config(p, dep)) {
+        ut_iter it = ut_ll_iter(p->use_private);
+        while (ut_iter_hasNext(&it)) {
+            char *dep = ut_iter_next(&it);
+            if (bake_project_add_dependency(p, dep)) {
                 goto error;
             }
         }
@@ -976,383 +1107,358 @@ error:
     return -1;
 }
 
-int16_t bake_project_add_generated_dependencies(
-    bake_project *p)
+static
+int16_t bake_project_build_artefact(
+    bake_config *config,
+    bake_project *project,
+    const char *artefact,
+    const char *artefact_path)
 {
-    if (!p->language) {
-        /* If this package does not have a language, no dependencies to add */
+    bake_driver *driver = project->language_driver->driver;
+    bake_filelist *output = bake_filelist_new(NULL, NULL);
+
+    /* Collect generated source files from drivers */
+    ut_iter it = ut_ll_iter(project->drivers);
+    while (ut_iter_hasNext(&it)) {
+        bake_project_driver *driver = ut_iter_next(&it);
+        bake_node *node = bake_node_find(driver->driver, "GENERATED-SOURCES");
+        if (node) {
+            bake_node_eval(driver->driver, node, project, config, NULL, output);
+        }
+    }
+
+    /* Set generated_files list, so SOURCES can find it when its evaluated */
+    project->generated_sources = output;
+
+    ut_try (ut_mkdir(artefact_path), NULL);
+
+    bake_driver *old_driver = ut_tls_get(BAKE_DRIVER_KEY);
+    ut_tls_set(BAKE_DRIVER_KEY, driver);
+    bake_project *old_project = ut_tls_get(BAKE_PROJECT_KEY);
+    ut_tls_set(BAKE_PROJECT_KEY, project);
+
+    /* Lookup artefact node, which must be the top level node */
+    bake_node *root = bake_node_find(driver, "ARTEFACT");
+    if (!root) {
+        ut_throw("rule ARTEFACT not found in driver '%s'", driver->id);
+        goto error;
+    }
+
+    /* Evaluate artefact node */
+    bake_filelist *artefact_fl = bake_filelist_new(NULL, NULL);
+    bake_filelist_add_file(artefact_fl, NULL, project->artefact_file);
+    if (bake_node_eval(driver, root, project, config, artefact_fl, NULL)) {
+        ut_throw("failed to build rule 'ARTEFACT'");
+        goto error;
+    }
+    bake_filelist_free(artefact_fl);
+
+    ut_tls_set(BAKE_DRIVER_KEY, old_driver);
+    ut_tls_set(BAKE_PROJECT_KEY, old_project);
+
+    return 0;
+error:
+    return -1;
+}
+
+int16_t bake_project_build(
+    bake_config *config,
+    bake_project *project)
+{
+    if (!project->artefact) {
         return 0;
     }
 
-    /* For each package, if use_generated_api is enabled, also include
-     * the package that contains the generated api for the language of
-     * the package */
-    if (p->use_generated_api && p->managed) {
-        /* First, add own generated language package */
-        if (p->model && p->public && p->kind == BAKE_PACKAGE) {
-            bake_project_use(p, strarg("%s/%s", p->id, p->language));
+    /* If keep_binary is true and artefact exists, don't build even if inputs
+     * are newer. This feature lets users control manually when a project should
+     * be rebuilt, and is useful for projects that take a long time. */
+    if (project->keep_binary && ut_file_test(project->artefact_file) == 1) {
+        return 0;
+    }
 
-            if (p->c4cpp) {
-                bake_project_use(p, strarg("%s/cpp", p->id));
-            }
-        }
+    /* Resolve libraries in project link attribute */
+    if (bake_project_resolve_links(config, project)) {
+        goto error;
+    }
 
-        int i = 0, count = corto_ll_count(p->use);
-        corto_iter it = corto_ll_iter(p->use);
-        while (corto_iter_hasNext(&it)) {
-            char *package = corto_iter_next(&it);
-            char *lastElem = strrchr(package, '/');
-            i ++;
-            if (lastElem) {
-                lastElem ++;
-                /* Don't try to find a language specific
-                 * package if this is already a language
-                 * specific package */
-                if (!strcmp(lastElem, p->language)) {
-                    continue;
-                }
-            }
+    /* Copy libraries to BAKE_TARGET, return list with local library names */
+    ut_ll old_link = project->link;
+    project->link = bake_project_copy_libs(project, config->target_lib);
+    if (!project->link) {
+        ut_throw(NULL);
+        goto error;
+    }
 
-            /* Insert language-specific package with generated
-             * API if it exists */
-            const char *lib = corto_locate(
-                strarg("%s/%s", package, p->language),
-                NULL,
-                CORTO_LOCATE_LIB);
-            if (lib) {
-                bake_project_use(p, strarg("%s/%s", package, p->language));
-            }
+    /* Add use dependencies to the link attribute */
+    if (bake_project_add_dependencies(project)) {
+        goto error;
+    }
 
-            /* Reached end of list- don't process packages that
-             * we just added */
-            if (i == count) {
-                break;
-            }
+    /* Run the top-level ARTEFACT rule */
+    if (bake_project_build_artefact(
+        config,
+        project,
+        project->artefact,
+        project->artefact_path))
+    {
+        bake_project_link_cleanup(project->link);
+        project->link = old_link;
+        goto error;
+    }
+
+    /* Cleanup temporary list */
+    bake_project_link_cleanup(project->link);
+
+    /* Restore old list */
+    project->link = old_link;
+
+    return 0;
+error:
+    return -1;
+}
+
+int16_t bake_project_prebuild(
+    bake_config *config,
+    bake_project *project)
+{
+    if (project->drivers) {
+        ut_iter it = ut_ll_iter(project->drivers);
+        while (ut_iter_hasNext(&it)) {
+            bake_project_driver *driver = ut_iter_next(&it);
+            ut_try(
+              bake_driver__prebuild(driver->driver, config, project), NULL);
         }
     }
 
     return 0;
+error:
+    return -1;
 }
 
-bool bake_project_is_generated_package(
-    bake_project *p,
-    const char *dependency)
+int16_t bake_project_postbuild(
+    bake_config *config,
+    bake_project *project)
 {
-    if (p->managed && p->language) {
-        if (!strcmp(dependency, strarg("%s/c", p->id))) {
-            return true;
-        } else if (!strcmp(dependency, strarg("%s/cpp", p->id))) {
-            return true;
+    if (project->drivers) {
+        ut_iter it = ut_ll_iter(project->drivers);
+        while (ut_iter_hasNext(&it)) {
+            bake_project_driver *driver = ut_iter_next(&it);
+            ut_try(
+              bake_driver__postbuild(driver->driver, config, project), NULL);
+        }
+    }
+
+    return 0;
+error:
+    return -1;
+}
+
+int16_t bake_project_clean_intern(
+    bake_config *config,
+    bake_project *project,
+    bool all_platforms)
+{
+    if (project->drivers) {
+        ut_iter it = ut_ll_iter(project->drivers);
+        while (ut_iter_hasNext(&it)) {
+            bake_project_driver *driver = ut_iter_next(&it);
+            ut_try( bake_driver__clean(driver->driver, config, project), NULL);
+        }
+    }
+
+    ut_try( ut_rm(project->cache_path), NULL);
+
+    if (!project->keep_binary) {
+        if (all_platforms) {
+            if (project->bin_path) {
+                ut_try( ut_rm(project->bin_path), NULL);
+            }
+        } else {
+            if (project->artefact_path) {
+                ut_try( ut_rm(project->artefact_path), NULL);
+            }
+        }
+    }
+
+    if (project->files_to_clean) {
+        ut_iter it = ut_ll_iter(project->files_to_clean);
+        while (ut_iter_hasNext(&it)) {
+            char *file = ut_iter_next(&it);
+            ut_try(ut_rm(strarg("%s/%s", project->path, file)), NULL);
+        }
+    }
+
+    project->changed = true;
+
+    return 0;
+error:
+    return -1;
+}
+
+int16_t bake_project_clean(
+    bake_config *config,
+    bake_project *project)
+{
+    return bake_project_clean_intern(config, project, true);
+}
+
+int16_t bake_project_clean_current_platform(
+    bake_config *config,
+    bake_project *project)
+{
+    return bake_project_clean_intern(config, project, false);
+}
+
+int16_t bake_project_should_ignore(
+    bake_project *project,
+    const char *file)
+{
+    if (project->drivers) {
+        ut_iter it = ut_ll_iter(project->drivers);
+        while (ut_iter_hasNext(&it)) {
+            bake_project_driver *driver = ut_iter_next(&it);
+
+            if (driver->driver->ignore_paths) {
+                ut_iter path_it = ut_ll_iter(driver->driver->ignore_paths);
+                while (ut_iter_hasNext(&path_it)) {
+                    const char *path = ut_iter_next(&path_it);
+                    if (!strcmp(path, file)) {
+                        return true;
+                    }
+                }
+            }
         }
     }
 
     return false;
 }
 
-bake_project* bake_project_new(
-    const char *path,
-    bake_config *cfg)
+static
+char* bake_random_description(void) {
+    char buffer[256];
+
+    char *function[] = {
+        "Car rentals",
+        "Ride sharing",
+        "Room sharing",
+        "Vegan meal delivery",
+        "Instant noodles",
+        "Premium coffee beans",
+        "Air conditioners",
+        "Sunscreen",
+        "Furniture",
+        "A microwave",
+        "Conditioner",
+        "Grocery stores",
+        "Photo sharing",
+        "A social network",
+        "Coding tutorials",
+        "Bodybuilding",
+        "Laser hair removal",
+        "A movie theater subscription service",
+        "Plant delivery",
+        "Shaving supplies",
+        "On demand country music",
+        "A dating site",
+        "Wine tasting",
+        "Solar energy",
+        "A towel",
+        "A middle out compression algorithm",
+        "Putting birds on ",
+        "Winter is coming",
+        "Space travel",
+        "Lightsabers",
+        "Hi-speed internet",
+        "A web framework",
+        "A fitness tracker"};
+
+    char *subject[] = {
+        "drones",
+        "self driving cars",
+        "air travel",
+        "kids",
+        "millenials",
+        "coders",
+        "project managers",
+        "entrepreneurs",
+        "influencers",
+        "movie stars",
+        "boy bands",
+        "designers",
+        "web developers",
+        "venture capitalists",
+        "sales reps",
+        "married couples",
+        "wookies",
+        "dogs",
+        "cats"};
+
+    strcpy(buffer, function[rand() % (sizeof(function) / sizeof(char*))]);
+    if (buffer[strlen(buffer) - 1] != ' ') {
+        strcat(buffer, " for ");
+    }
+    strcat(buffer, subject[rand() % (sizeof(subject) / sizeof(char*))]);
+
+    return strdup(buffer);
+}
+
+
+int16_t bake_project_setup(
+    bake_config *config,
+    bake_project *project)
 {
-    bake_project* result = corto_calloc(sizeof (bake_project));
-    result->sources = corto_ll_new();
-    result->includes = corto_ll_new();
-    result->use = corto_ll_new();
-    result->use_private = corto_ll_new();
-    result->use_build = corto_ll_new();
-    result->link = corto_ll_new();
-    result->files_to_clean = corto_ll_new();
-    result->cfg = cfg;
+    bake_driver *driver = project->language_driver->driver;
 
-    /* Default values */
-    result->path = path ? strdup(path) : NULL;
-    result->public = true;
-    result->managed = true;
-    result->use_generated_api = true;
-    result->language = corto_strdup("c");
-    result->error = false;
-    result->freshly_baked = false;
-    result->artefact_outdated = false;
-    result->sources_outdated = false;
-    result->built = false;
+    char *description = bake_random_description();
 
-    /* Set interface callbacks */
-    result->get_attr = bake_project_getattr_cb;
-    result->get_attr_string = bake_project_getattr_string_cb;
-    result->get_attr_bool = bake_project_getattr_bool_cb;
-    result->clean = bake_project_clean_cb;
-    result->add_build_dependency = bake_project_add_build_dependency_cb;
+    ut_try(!
+        ut_proc_runRedirect("git", (const char*[]){"git", "init", NULL}, stdin, stdout, stderr),
+        "failed to initialize git repository");
 
-    /* Parse project.json if available */
-    if (bake_project_parse_config(result)) {
-        corto_throw("failed to parse '%s/project.json'", path);
+    /* Create project.json */
+    FILE *f = fopen("project.json", "w");
+    fprintf(f,
+        "{\n"
+        "    \"id\": \"%s\",\n"
+        "    \"type\": \"%s\",\n"
+        "    \"value\": {\n"
+        "        \"author\": \"John Doe\",\n"
+        "        \"description\": \"%s\",\n"
+        "        \"version\": \"0.0.0\",\n"
+        "        \"repository\": null,\n"
+        "        \"license\": null",
+            project->id,
+            project->type == BAKE_PACKAGE
+                ? "package"
+                : project->type == BAKE_APPLICATION
+                    ? "application"
+                    : "tool",
+            description);
+    if (strcmp(project->language, "c")) {
+        fprintf(f,
+        ",\n        \"language\": \"%s\"",
+            project->language);
+    }
+    fprintf(f, "\n    }\n}\n");
+
+    fclose(f);
+
+    if (driver) {
+        ut_try( bake_driver__setup(driver, config, project), NULL);
+    } else {
+        ut_throw(
+            "cannot init: project '%s' does not configure a language",
+            project->id);
         goto error;
     }
 
-    /* If 'src' and 'includes' weren't set, use defaults */
-    if (!corto_ll_count(result->sources)) {
-        corto_ll_append(result->sources, "src");
-    }
-
-    if (!corto_ll_count(result->includes)) {
-        corto_ll_append(result->includes, "include");
-    }
-
-    if (result->language && result->managed) {
-        /* Add extension package for model file */
-        result->model = bake_project_modelFile(result);
-        if (result->model) {
-            char *ext = strrchr(result->model, '.');
-            if (ext) {
-                ext ++;
-                corto_ll_append(result->use_build, corto_asprintf("driver/ext/%s", ext));
-            }
-        } else if (result->error) {
-            goto error;
-        }
-
-        /* Managed projects need the code generator */
-        corto_ll_append(result->use_build, corto_asprintf("driver/tool/pp"));
-
-        /* Add corto as dependency to managed packages */
-        bake_project_use(result, "corto");
-    }
-
-    if (result->use_generated_api && result->managed) {
-        bake_project_use(result, "corto/c");
-    }
-
-    if (!result->version) {
-        result->version = corto_strdup("0.0.0");
-    }
-
-    return result;
-error:
-    if (result) {
-        if (result->path) free(result->path);
-        free(result);
-    }
-    return NULL;
-}
-
-void bake_project_free(
-    bake_project *p)
-{
-    if (p->path) free(p->path);
-    if (p->use) corto_ll_free(p->use);
-    if (p->use_private) corto_ll_free(p->use_private);
-    if (p->sources) corto_ll_free(p->sources);
-    if (p->includes) corto_ll_free(p->includes);
-    if (p->files_to_clean) corto_ll_free(p->files_to_clean);
-    free(p);
-}
-
-char* bake_project_binaryPath(
-    bake_project *p)
-{
-    if (p->kind == BAKE_TOOL || p->kind == BAKE_APPLICATION) {
-        return corto_strdup(p->cfg->binpath);
-    } else {
-        return corto_strdup(p->cfg->libpath);
-    }
-}
-
-char* bake_project_includePath(
-    bake_project *p)
-{
-    return corto_asprintf("%s/include", p->cfg->rootpath);
-}
-
-char* bake_project_etcPath(
-    bake_project *p)
-{
-    return corto_asprintf("%s/etc", p->cfg->rootpath);
-}
-
-void bake_project_addSource(
-    bake_project *p,
-    const char *source)
-{
-    corto_iter it = corto_ll_iter(p->sources);
-    while (corto_iter_hasNext(&it)) {
-        char *project_source = corto_iter_next(&it);
-        if (!strcmp(project_source, source)) {
-            /* Duplicate */
-            return;
-        }
-    }
-
-    corto_ll_append(p->sources, corto_strdup(source));
-}
-
-void bake_project_addInclude(
-    bake_project *p,
-    const char *include)
-{
-    corto_iter it = corto_ll_iter(p->includes);
-    while (corto_iter_hasNext(&it)) {
-        char *project_include = corto_iter_next(&it);
-        if (!strcmp(project_include, include)) {
-            /* Duplicate */
-            return;
-        }
-    }
-
-    corto_ll_append(p->includes, corto_strdup(include));
-}
-
-void bake_project_use(
-    bake_project *p,
-    const char *use)
-{
-    corto_iter it = corto_ll_iter(p->use);
-    while (corto_iter_hasNext(&it)) {
-        char *project_use = corto_iter_next(&it);
-        if (!strcmp(project_use, use)) {
-            /* Duplicate */
-            return;
-        }
-    }
-
-    corto_ll_append(p->use, corto_strdup(use));
-}
-
-void bake_project_use_private(
-    bake_project *p,
-    const char *use)
-{
-    corto_iter it = corto_ll_iter(p->use_private);
-    while (corto_iter_hasNext(&it)) {
-        char *project_use = corto_iter_next(&it);
-        if (!strcmp(project_use, use)) {
-            /* Duplicate */
-            return;
-        }
-    }
-
-    corto_ll_append(p->use_private, corto_strdup(use));
-}
-
-static
-char *bake_project_find_link_library(
-    const char *name)
-{
-    char *result = NULL;
-
-    /* If link points to hardcoded filename, return as is */
-    if (corto_file_test(name)) {
-        return corto_strdup(name);
-    }
-
-    /* If not found, check if provided name has an extension */
-    char *ext = strrchr(name, '.');
-    if (ext && !strchr(name, '/')) {
-        /* Hardcoded filename was provided but not found */
-        return NULL;
-    }
-
-    /* Try finding a library called lib*.so or lib*.dylib (OSX only) */
-    char *full_path = strdup(name);
-    char *lib_name = strrchr(full_path, '/');
-    if (lib_name) {
-        lib_name[0] = '\0';
-        lib_name ++;
-    } else {
-        lib_name = full_path;
-        full_path = NULL;
-    }
-
-    /* Try .so */
-    if (full_path) {
-        char *so = corto_asprintf("%s/lib%s.so", full_path, lib_name);
-        if (corto_file_test(so)) {
-            result = so;
-        }
-    } else {
-        char *so = corto_asprintf("lib%s.so", lib_name);
-        if (corto_file_test(so)) {
-            result = so;
-        }
-    }
-
-    /* Try .dylib */
-    if (!result && !strcmp(CORTO_OS_STRING, "darwin")) {
-        if (full_path) {
-            char *dylib = corto_asprintf("%s/lib%s.dylib", full_path, lib_name);
-            if (corto_file_test(dylib)) {
-                result = dylib;
-            }
-        } else {
-            char *dylib = corto_asprintf("lib%s.dylib", lib_name);
-            if (corto_file_test(dylib)) {
-                result = dylib;
-            }
-        }
-    }
-
-    /* Try .a */
-    if (!result) {
-        if (full_path) {
-            char *a = corto_asprintf("%s/lib%s.a", full_path, lib_name);
-            if (corto_file_test(a)) {
-                result = a;
-            }
-        } else {
-            char *a = corto_asprintf("lib%s.a", lib_name);
-            if (corto_file_test(a)) {
-                result = a;
-            }
-        }
-    }
-
-    if (full_path) {
-        free(full_path);
-    } else if (lib_name) {
-        free(lib_name);
-    }
-
-    return result;
-}
-
-void bake_project_link(
-    bake_project *p,
-    const char *use)
-{
-    corto_iter it = corto_ll_iter(p->link);
-    while (corto_iter_hasNext(&it)) {
-        char *project_use = corto_iter_next(&it);
-        if (!strcmp(project_use, use)) {
-            /* Duplicate */
-            return;
-        }
-    }
-
-    corto_ll_append(p->link, corto_strdup(use));
-}
-
-int16_t bake_project_resolveLinks(
-    bake_project *p)
-{
-    corto_ll resolved = corto_ll_new();
-    corto_iter it = corto_ll_iter(p->link);
-    while (corto_iter_hasNext(&it)) {
-        char *project_use = corto_iter_next(&it);
-        char *parsed = bake_project_replace(p, NULL, project_use);
-        if (!parsed) {
-            goto error;
-        }
-        char *lib = bake_project_find_link_library(parsed);
-        if (!lib) {
-            corto_throw("cannot find library '%s' in 'link' attribute", parsed);
-            goto error;
-        }
-        corto_ll_append(resolved, lib);
-    }
-
-    bake_clean_string_array(p->link);
-    p->link = resolved;
+    ut_log("Created new %s with id '%s'\n",
+        project->type == BAKE_APPLICATION
+            ? "application"
+            : "package",
+        project->id);
 
     return 0;
 error:
-    bake_clean_string_array(resolved);
     return -1;
 }

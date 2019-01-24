@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 the corto developers
+/* Copyright (c) 2010-2018 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -21,188 +21,256 @@
 
 #include "bake.h"
 
-struct bake_crawler_s {
-    corto_rb nodes; /* tree optimizes looking up dependencies */
-    corto_ll leafs; /* projects that cannot act as dependencies */
+struct bake_crawler {
+    ut_rb nodes; /* tree optimizes looking up dependencies */
+    ut_ll leafs; /* projects that cannot act as dependencies */
     uint32_t count;
-    bake_config *cfg;
 };
 
+static bake_crawler *crawler;
+
 static
-int project_cmp(void *ctx, const void* key1, const void* key2) {
+int project_cmp(
+    void *ctx,
+    const void* key1,
+    const void* key2)
+{
     return strcmp(key1, key2);
 }
 
 static
 void bake_crawler_addDependency(
-    bake_crawler _this,
     bake_project *p,
     char *use)
 {
-  /* Replace '.' with '/' */
-    corto_id use_buffer;
-    char *ptr, ch;
-    strcpy(use_buffer, use);
-    for (ptr = use_buffer; (ch = *ptr); ptr ++) {
-        if (ch == '.') {
-            *ptr = '/';
-        }
-    }
-
-    bake_project *dep = corto_rb_find(_this->nodes, use_buffer);
+    bake_project *dep = ut_rb_find(crawler->nodes, use);
     if (!dep) {
         /* Create placeholder */
         dep = bake_project_new(NULL, NULL);
-        dep->id = corto_strdup(use_buffer);
-        corto_rb_set(_this->nodes, dep->id, dep);
+        if (dep) {
+            dep->id = ut_strdup(use);
+            ut_rb_set(crawler->nodes, dep->id, dep);
+        }
     }
 
     if (!dep->dependents) {
-        dep->dependents = corto_ll_new();
+        dep->dependents = ut_ll_new();
     }
 
-    corto_ll_append(dep->dependents, p);
+    ut_ll_append(dep->dependents, p);
 }
 
-bake_project* bake_crawler_addProject(
-    bake_crawler _this,
-    const char *path)
+bake_project* bake_crawler_get(
+    const char *id)
 {
-    bake_project *p = bake_project_new(path, _this->cfg);
-    if (!p) {
-        return NULL;
+    bake_project *result = NULL;
+
+    if (crawler->nodes) {
+        result = ut_rb_find(crawler->nodes, id);
+        if (result && !result->path) {
+            /* Ignore placeholder projects */
+            result = NULL;
+        }
     }
 
-    if (!_this->nodes) _this->nodes = corto_rb_new(project_cmp, NULL);
+    if (!result && crawler->leafs) {
+        ut_iter it = ut_ll_iter(crawler->leafs);
+        while (ut_iter_hasNext(&it)) {
+            bake_project *project = ut_iter_next(&it);
+            if (!strcmp(project->id, id)) {
+                result = project;
+                break;
+            }
+        }
+    }
 
-    if (p->kind == BAKE_PACKAGE && p->public) {
+    return result;
+}
+
+int16_t bake_crawler_add(
+    bake_config *config,
+    bake_project *p)
+{
+    if (!p) {
+        return 0;
+    }
+
+    if (!crawler->nodes) crawler->nodes = ut_rb_new(project_cmp, NULL);
+
+    ut_try (bake_do_pre_discovery(config, p), NULL);
+
+    if (p->type == BAKE_PACKAGE && p->public) {
         bake_project *found;
-        if ((found = corto_rb_findOrSet(_this->nodes, p->id, p)) && found != p) {
+        if ((found = ut_rb_findOrSet(crawler->nodes, p->id, p)) && found != p) {
             if (found->path) {
-                corto_throw(
-                    "duplicate project '%s' found in '%s' (first found here: '%s')",
-                    p->id,
-                    found->path,
-                    p->path);
+                ut_throw(
+                  "duplicate project '%s' found in '%s' (first found here: '%s')",
+                  p->id,
+                  found->path,
+                  p->path);
                 goto error;
             } else {
                 /* This is a placeholder. Replace it with the actual project. */
                 p->dependents = found->dependents;
                 found->dependents = NULL;
                 bake_project_free(found);
-                corto_rb_set(_this->nodes, p->id, p);
+                ut_rb_set(crawler->nodes, p->id, p);
             }
         }
     } else {
-        if (!_this->leafs) _this->leafs = corto_ll_new();
-        corto_ll_append(_this->leafs, p);
+        if (!crawler->leafs) crawler->leafs = ut_ll_new();
+        ut_ll_append(crawler->leafs, p);
     }
 
-    /* Initialize project before building dependency administration */
-    if (p->language) {
-        bake_language *l = bake_language_get(p->language);
-        if (l) { /* During setup language may not yet be installed */
-            bake_language_init(l, p);
-        } else {
-            corto_catch();
-            corto_debug("ignore missing language for now, in case this is setup");
-        }
-    }
+    crawler->count ++;
+
+    ut_trace("discovered project '%s' in '%s'", p->id, p->path);
+
+    return 0;
+error:
+    return -1;
+}
+
+static
+int16_t bake_crawler_finalize_project(
+    bake_config *config,
+    bake_project *p)
+{
+    ut_try (bake_do_post_discovery(config, p), NULL);
 
     /* Add dependency information */
-    p->unresolved_dependencies = corto_ll_count(p->use);
-    p->unresolved_dependencies += corto_ll_count(p->use_build);
-    p->unresolved_dependencies += corto_ll_count(p->use_private);
+    p->unresolved_dependencies = ut_ll_count(p->use);
+    p->unresolved_dependencies += ut_ll_count(p->use_build);
+    p->unresolved_dependencies += ut_ll_count(p->use_private);
 
     /* Add project to dependent lists of dependencies */
-    corto_iter it = corto_ll_iter(p->use);
-    while (corto_iter_hasNext(&it)) {
-        char *use = corto_iter_next(&it);
-        bake_crawler_addDependency(_this, p, use);
+    ut_iter it = ut_ll_iter(p->use);
+    while (ut_iter_hasNext(&it)) {
+        char *use = ut_iter_next(&it);
+        bake_crawler_addDependency(p, use);
     }
 
     /* Add project to dependent lists of private dependencies */
-    it = corto_ll_iter(p->use_private);
-    while (corto_iter_hasNext(&it)) {
-        char *use = corto_iter_next(&it);
-        bake_crawler_addDependency(_this, p, use);
+    it = ut_ll_iter(p->use_private);
+    while (ut_iter_hasNext(&it)) {
+        char *use = ut_iter_next(&it);
+        bake_crawler_addDependency(p, use);
     }
 
     /* Add project to dependent lists of build dependencies */
-    it = corto_ll_iter(p->use_build);
-    while (corto_iter_hasNext(&it)) {
-        char *use = corto_iter_next(&it);
-        bake_crawler_addDependency(_this, p, use);
+    it = ut_ll_iter(p->use_build);
+    while (ut_iter_hasNext(&it)) {
+        char *use = ut_iter_next(&it);
+        bake_crawler_addDependency(p, use);
     }
 
-    _this->count ++;
+    ut_trace("initialized project '%s' in '%s'", p->id, p->path);
 
-    corto_trace("found project '%s'", p->id);
-
-    return p;
+    return 0;
 error:
-    return NULL;
+    return -1;
+}
+
+static
+int16_t bake_crawler_finalize(
+    bake_config *config)
+{
+    /* Collect projects in list before finalizing. Finalization step may mutate
+     * the tree, and cannot mutate tree while walking over it. */
+    ut_ll projects = ut_ll_new();
+    ut_iter it = ut_rb_iter(crawler->nodes);
+    while (ut_iter_hasNext(&it)) {
+        bake_project *p = ut_iter_next(&it);
+        if (!p->path) {
+            continue;
+        }
+
+        ut_ll_append(projects, p);
+    }
+
+    /* Now finalize projects */
+    it = ut_ll_iter(projects);
+    while (ut_iter_hasNext(&it)) {
+        bake_project *p = ut_iter_next(&it);
+        ut_try(bake_crawler_finalize_project(config, p), NULL);
+    }
+
+    ut_ll_free(projects);
+
+    it = ut_ll_iter(crawler->leafs);
+    while (ut_iter_hasNext(&it)) {
+        bake_project *p = ut_iter_next(&it);
+        ut_try(bake_crawler_finalize_project(config, p), NULL);
+    }
+
+    return 0;
+error:
+    return -1;
 }
 
 static
 int16_t bake_crawler_crawl(
-    bake_crawler _this,
+    bake_config *config,
     const char *wd,
     const char *path)
 {
-    char *prev = strdup(corto_cwd());
+    char *prev = strdup(ut_cwd());
     char *fullpath;
     if (path[0] != '/') {
-        fullpath = corto_asprintf("%s/%s", wd, path);
-        corto_path_clean(fullpath, fullpath);
+        fullpath = ut_asprintf("%s/%s", wd, path);
+        ut_path_clean(fullpath, fullpath);
     } else {
-        fullpath = corto_strdup(path);
+        fullpath = ut_strdup(path);
     }
 
     bool isProject = false;
     bake_project *p = NULL;
 
-    if (corto_chdir(path)) {
-        goto error;
-    }
-
-    if (corto_file_test("project.json")) {
+    if (ut_file_test(strarg("%s/project.json", fullpath))) {
         isProject = true;
-        if (!(p = bake_crawler_addProject(_this, fullpath))) {
+
+        p = bake_project_new(fullpath, config);
+        if (!p) {
             goto error;
         }
 
-        if (corto_file_test("rakefile")) {
-            corto_warning(
-                "path '%s' contains redundant rakefile",
-                fullpath);
+        if (bake_crawler_add(config, p)) {
+            ut_warning("ignoring '%s' because of errors", fullpath);
+        } else {
+            if (ut_file_test("rakefile")) {
+                ut_warning(
+                    "path '%s' contains redundant rakefile",
+                    fullpath);
+            }
         }
     } else {
-        if (corto_file_test("rakefile")) {
-            corto_warning(
+        if (ut_file_test("rakefile")) {
+            ut_warning(
                 "path '%s' contains rake-based project, skipping",
                 fullpath);
             goto skip;
         }
     }
 
-    corto_iter it;
-    if (corto_dir_iter(".", NULL, &it)) {
-        corto_throw("failed to open directory '%s'", fullpath);
+    ut_iter it;
+    if (ut_dir_iter(fullpath, NULL, &it)) {
+        ut_throw("failed to open directory '%s'", fullpath);
         goto error;
     }
 
-    while (corto_iter_hasNext(&it)) {
-        char *file = corto_iter_next(&it);
+    while (ut_iter_hasNext(&it)) {
+        char *file = ut_iter_next(&it);
 
-        if (corto_isdir(file)) {
+        if (file[0] == '.') {
+            continue;
+        }
 
+        if (ut_isdir(strarg("%s/%s", fullpath, file))) {
 
-            /* If this is a corto project, filter out directories that have
+            /* If this is a bake project, filter out directories that have
              * special meaning. */
             if (isProject) {
-                if (file[0] == '.' ||
-                    !strcmp(file, "src") ||
+                if (!strcmp(file, "src") ||
                     !strcmp(file, "include") ||
                     !strcmp(file, "config") ||
                     !strcmp(file, "data") ||
@@ -211,104 +279,88 @@ int16_t bake_crawler_crawl(
                     !strcmp(file, "lib") ||
                     !strcmp(file, "bin") ||
                     !strcmp(file, "install") ||
-                    !strcmp(file, ".bake_cache"))
+                    !strcmp(file, "examples") ||
+                    !strcmp(file, ".bake_cache") ||
+                    (p && bake_project_should_ignore(p, file)))
                 {
-                    corto_debug("ignoring directory '%s'", file);
+                    ut_debug("ignoring directory '%s'", file);
                     continue;
                 }
 
-                corto_trace("looking for projects in '%s'", file);
+                ut_debug("looking for projects in '%s'", file);
 
-                if (p->managed && p->language) {
-                    if (!strcmp(file, "c") || !strcmp(file, "cpp")) {
-                        continue;
-                    }
-                }
+                /* TODO: ignore generated directories */
             } else {
-                corto_trace("looking for projects in '%s'", file);
+                ut_debug("looking for projects in '%s'", file);
             }
 
-            if (bake_crawler_crawl(_this, fullpath, file)) {
-                corto_iter_release(&it);
+            if (bake_crawler_crawl(config, fullpath, file)) {
+                ut_iter_release(&it);
                 goto error;
             }
         }
     }
 
 skip:
-    if (corto_chdir(prev)) {
-        corto_throw("failed to restore directory to '%s'", prev);
-        goto error;
-    }
-
     return 0;
 error:
     if (prev) free(prev);
     return -1;
 }
 
-bake_crawler bake_crawler_new(
-    bake_config *cfg)
+void bake_crawler_init(void)
 {
-    bake_crawler result = corto_calloc(sizeof(struct bake_crawler_s));
-    result->cfg = cfg;
-    return result;
+    crawler = ut_calloc(sizeof(bake_crawler));
 }
 
-void bake_crawler_free(bake_crawler _this)
+void bake_crawler_free(void)
 {
-    if (_this->nodes) {
-        corto_iter it = corto_rb_iter(_this->nodes);
-        while (corto_iter_hasNext(&it)) {
-            bake_project *p = corto_iter_next(&it);
+    if (crawler->nodes) {
+        ut_iter it = ut_rb_iter(crawler->nodes);
+        while (ut_iter_hasNext(&it)) {
+            bake_project *p = ut_iter_next(&it);
             bake_project_free(p);
         }
-        corto_rb_free(_this->nodes);
+        ut_rb_free(crawler->nodes);
     }
-    if (_this->leafs) {
-        corto_iter it = corto_ll_iter(_this->leafs);
-        while (corto_iter_hasNext(&it)) {
-            bake_project *p = corto_iter_next(&it);
+    if (crawler->leafs) {
+        ut_iter it = ut_ll_iter(crawler->leafs);
+        while (ut_iter_hasNext(&it)) {
+            bake_project *p = ut_iter_next(&it);
             bake_project_free(p);
         }
-        corto_ll_free(_this->leafs);
+        ut_ll_free(crawler->leafs);
     }
-    free (_this);
+    free (crawler);
 }
 
-uint32_t bake_crawler_count(
-    bake_crawler _this)
+uint32_t bake_crawler_count(void)
 {
-    return (_this->nodes ? corto_rb_count(_this->nodes) : 0) +
-        (_this->leafs ? corto_ll_count(_this->leafs) : 0);
+    return crawler->count;
 }
 
-int16_t bake_crawler_search(
-    bake_crawler _this,
+uint32_t bake_crawler_search(
+    bake_config *config,
     const char *path)
 {
-    int ret = 0;
-    int count = bake_crawler_count(_this);
+    int count = bake_crawler_count();
 
-    if (corto_file_test(path)) {
-        ret = bake_crawler_crawl(_this, ".", path);
+    if (ut_file_test(path)) {
+        ut_try( bake_crawler_crawl(config, ".", path), NULL);
     } else {
-        corto_throw("path '%s' not found", path);
+        ut_throw("path '%s' not found", path);
         goto error;
     }
 
-    if (!ret && bake_crawler_count(_this) == count) {
-        corto_trace("no projects found in path '%s'", path);
-    }
-
-    return ret;
+    /* Only report how many new projects were found in path */
+    return bake_crawler_count() - count;
 error:
     return -1;
 }
 
 static
 const char* bake_project_kind_str(
-    bake_project_kind kind)
+    bake_project_type kind)
 {
     switch(kind) {
     case BAKE_TOOL: return "tool";
@@ -321,16 +373,17 @@ const char* bake_project_kind_str(
 static
 void bake_crawler_decrease_dependents(
     bake_project *p,
-    corto_ll readyForBuild)
+    ut_ll readyForBuild)
 {
     if (p->dependents) {
-        corto_iter dep_it = corto_ll_iter(p->dependents);
-        while (corto_iter_hasNext(&dep_it)) {
-            bake_project *dependent = corto_iter_next(&dep_it);
+        ut_iter dep_it = ut_ll_iter(p->dependents);
+        while (ut_iter_hasNext(&dep_it)) {
+            bake_project *dependent = ut_iter_next(&dep_it);
             dependent->unresolved_dependencies --;
+
             if (!dependent->unresolved_dependencies) {
                 if (readyForBuild) {
-                    corto_ll_append(readyForBuild, dependent);
+                    ut_ll_append(readyForBuild, dependent);
                 }
             }
         }
@@ -339,43 +392,30 @@ void bake_crawler_decrease_dependents(
 
 static
 int16_t bake_crawler_build_project(
-    bake_crawler _this,
+    bake_config *config,
     const char *action_name,
     bake_crawler_cb action,
     bake_project *p,
-    void *ctx,
-    corto_ll readyForBuild)
+    ut_ll readyForBuild)
 {
-    corto_ok(
-        "begin %s %s '%s' in '%s'",
-        action_name, bake_project_kind_str(p->kind), p->id, p->path);
+    ut_ok(
+        "#[grey]begin %s of %s '%s' in '%s'",
+        action_name, bake_project_kind_str(p->type), p->id, p->path);
 
-    char *prev = strdup(corto_cwd());
-    if (corto_chdir(p->path)) {
-        free(prev);
-        goto error;
-    }
-
-    if (!action(_this, p, ctx)) {
-        corto_throw("bake interrupted by '%s' in '%s'", p->id, p->path);
-        free(prev);
+    if (action(config, p)) {
+        ut_throw("bake interrupted by '%s' in '%s'", p->id, p->path);
         goto error;
     }
 
     if (p->changed) {
-        corto_info(
-            "%s %s '%s' in '%s'",
-            action_name, bake_project_kind_str(p->kind), p->id, p->path);
-    } else {
-        corto_info(
-            "#[grey]up to date#[normal] '%s'",
+        ut_log(
+            "%s '%s' in '%s'\n",
+            action_name, p->id, p->path);
+    } else if (p->language && strcmp(action_name, "foreach")) {
+        ut_log(
+            "#[grey]ready '%s'\n",
             p->id);
     }
-    if (corto_chdir(prev)) {
-        free(prev);
-        goto error;
-    }
-    free(prev);
 
     /* Decrease unresolved_dependencies of dependents */
     bake_crawler_decrease_dependents(p, readyForBuild);
@@ -387,32 +427,34 @@ error:
 
 static
 void bake_crawler_collect_projects(
-    bake_crawler _this,
-    corto_iter *it,
-    corto_ll readyForBuild)
+    ut_iter *it,
+    ut_ll readyForBuild)
 {
-    while (corto_iter_hasNext(it)) {
-        bake_project *p = corto_iter_next(it);
+    while (ut_iter_hasNext(it)) {
+        bake_project *p = ut_iter_next(it);
+
         if (p->path && !p->unresolved_dependencies) {
-            corto_ll_append(readyForBuild, p);
+            ut_ll_append(readyForBuild, p);
         }
     }
 }
 
 int16_t bake_crawler_walk(
-    bake_crawler _this,
+    bake_config *config,
     const char *action_name,
-    bake_crawler_cb action,
-    void *ctx)
+    bake_crawler_cb action)
 {
-    corto_ll readyForBuild = corto_ll_new();
+    ut_ll readyForBuild = ut_ll_new();
     uint32_t built = 0;
 
+    /* Initialize dependency administration */
+    ut_try( bake_crawler_finalize(config), NULL);
+
     /* Decrease unresolved dependencies for placeholder projects */
-    if (_this->nodes) {
-        corto_iter it = corto_rb_iter(_this->nodes);
-        while (corto_iter_hasNext(&it)) {
-            bake_project *p = corto_iter_next(&it);
+    if (crawler->nodes) {
+        ut_iter it = ut_rb_iter(crawler->nodes);
+        while (ut_iter_hasNext(&it)) {
+            bake_project *p = ut_iter_next(&it);
             if (!p->path) {
                 bake_crawler_decrease_dependents(p, NULL);
             }
@@ -420,36 +462,36 @@ int16_t bake_crawler_walk(
     }
 
     /* Collect initial projects */
-    if (_this->nodes) {
-        corto_iter it = corto_rb_iter(_this->nodes);
-        bake_crawler_collect_projects(_this, &it, readyForBuild);
+    if (crawler->nodes) {
+        ut_iter it = ut_rb_iter(crawler->nodes);
+        bake_crawler_collect_projects(&it, readyForBuild);
     }
 
-    if (_this->leafs) {
-        corto_iter it = corto_ll_iter(_this->leafs);
-        bake_crawler_collect_projects(_this, &it, readyForBuild);
+    if (crawler->leafs) {
+        ut_iter it = ut_ll_iter(crawler->leafs);
+        bake_crawler_collect_projects(&it, readyForBuild);
     }
 
     /* Walk projects (when dependencies are resolved the list will populate) */
     bake_project *p;
-    while ((p = corto_ll_takeFirst(readyForBuild))) {
-        if (bake_crawler_build_project(_this, action_name, action, p, ctx, readyForBuild)) {
-            corto_throw(NULL);
-            goto error;
-        }
+    while ((p = ut_ll_takeFirst(readyForBuild))) {
+        ut_try (
+            bake_crawler_build_project(
+                config, action_name, action, p, readyForBuild), NULL);
         built ++;
     }
 
     /* If there are still unbuilt projects there must be a cycle in the graph */
-    if (built != _this->count) {
-        corto_throw("project dependency graph contains cycles (%d built vs %d total)",
-            built, _this->count);
+    if (built != crawler->count) {
+        ut_throw(
+            "project dependency graph contains cycles (%d built vs %d total)",
+            built, crawler->count);
         goto error;
     }
 
-    corto_ll_free(readyForBuild);
+    ut_ll_free(readyForBuild);
 
-    return 1;
-error:
     return 0;
+error:
+    return -1;
 }

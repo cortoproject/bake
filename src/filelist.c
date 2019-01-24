@@ -1,14 +1,35 @@
+/* Copyright (c) 2010-2018 Sander Mertens
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
 
 #include "bake.h"
 
-extern corto_tls BAKE_FILELIST_KEY;
+extern ut_tls BAKE_FILELIST_KEY;
 
 bake_file* bake_file_copy(
     bake_file *file)
 {
     bake_file *result = malloc(sizeof(bake_file));
-    result->name = corto_strdup(file->name);
-    result->offset = file->offset ? corto_strdup(file->offset) : NULL;
+    result->name = ut_strdup(file->name);
+    result->path = ut_strdup(file->path);
+    result->file_path = ut_strdup(file->file_path);
     result->timestamp = file->timestamp;
     return result;
 }
@@ -20,13 +41,15 @@ void bake_filelist_free(
         free(fl->pattern);
     }
     if (fl->files) {
-        corto_iter it = corto_ll_iter(fl->files);
-        while (corto_iter_hasNext(&it)) {
-            bake_file *f = corto_iter_next(&it);
+        ut_iter it = ut_ll_iter(fl->files);
+        while (ut_iter_hasNext(&it)) {
+            bake_file *f = ut_iter_next(&it);
             if (f->name) free(f->name);
+            if (f->path) free(f->path);
+            if (f->file_path) free(f->file_path);
             free(f);
         }
-        corto_ll_free(fl->files);
+        ut_ll_free(fl->files);
     }
     free(fl);
 }
@@ -34,139 +57,85 @@ void bake_filelist_free(
 static
 bake_file* bake_filelist_add_intern(
     bake_filelist *fl,
+    const char *path,
     const char *filename,
-    const char *offset,
     time_t timestamp)
 {
     if (timestamp < 0) {
-        corto_throw(NULL);
+        ut_throw(NULL);
         goto error;
     }
 
-    bake_file *bfile = corto_alloc(sizeof(bake_file));
-    bfile->name = corto_strdup(filename);
-    bfile->offset = offset ? corto_strdup(offset) : NULL;
+    bake_file *bfile = malloc(sizeof(bake_file));
+    bfile->name = ut_strdup(filename);
+    bfile->path = ut_strdup(path);
+
+    if (filename[0] == '/') {
+        bfile->file_path = ut_strdup(filename);
+    } else {
+        bfile->file_path = ut_asprintf("%s/%s", path, filename);
+    }
     bfile->timestamp = timestamp;
 
-    if (!fl->files) {
-        fl->files = corto_ll_new();
-    }
-    corto_ll_append(fl->files, bfile);
+    ut_ll_append(fl->files, bfile);
 
     if (timestamp) {
-        corto_debug("add '%s' with timestamp %d", filename, timestamp);
+        ut_trace("#[grey]%s (modified=%d, path='%s')", filename, timestamp, path);
     } else {
-        corto_debug("add '%s' with timestamp 0", filename);
+        ut_trace("#[grey]%s (modified=0, path='%s')", filename, path);
     }
 
     return bfile;
-error: 
+error:
     return NULL;
 }
 
 static
 int16_t bake_filelist_populate(
     bake_filelist *fl,
-    const char *offset,
+    const char *path,
     const char *pattern)
 {
-    char *dir = NULL;
-    bool skip = false;
+    ut_iter it;
+    ut_try (ut_dir_iter(path, pattern, &it), NULL);
 
-    /* Optimize filter evaluation by extracting static path from pattern */
-    const char *ptr = pattern, *end = pattern;
-    char ch;
-    while ((ch = *ptr)) {
-        if (ch == '/') {
-            if (ptr[1] == '/') {
-                end = ptr;
-                break;
-            } else {
-                end = ptr;
-            }
-        } else if (corto_idmatch_isOperator(ch)) {
-            break;
+    char *clean_path = ut_strdup(path);
+    ut_path_clean(clean_path, clean_path);
+
+    while (ut_iter_hasNext(&it)) {
+        const char *file = ut_iter_next(&it);
+        char *file_path = ut_asprintf("%s/%s", path, file);
+
+        time_t last_modified = ut_lastmodified(file_path);
+        if (last_modified == -1) {
+            ut_catch();
         }
-        ptr ++;
+
+        free(file_path);
+
+        bake_filelist_add_intern(
+            fl, path, file, last_modified);
     }
 
-    corto_iter it;
-    if (end != pattern) {
-        dir = strdup(pattern);
-        dir[end - pattern] = '\0';
+    free (clean_path);
 
-        if (end[-1] == '/') {
-            end --;
-        } else {
-            end ++;
-            if (!*end) {
-                end = "*";
-            }
-        }
-
-        corto_trace("match pattern '%s' in '%s/%s'", end, corto_cwd(), dir);
-        if (corto_file_test(dir)) {
-            if (corto_dir_iter(dir, end, &it)) {
-                corto_throw(NULL);
-                goto error;
-            }
-        } else {
-            corto_trace("directory '%s' does not exist, skipping pattern", dir);
-            skip = true;
-        }
-    } else {
-        corto_trace("match pattern '%s' in '%s'", pattern, corto_cwd());
-        if (corto_dir_iter(".", pattern, &it)) {
-            corto_throw(NULL);
-            goto error;
-        }
-    }
-
-    /* Iterate directory, add matched files */
-    if (!skip) {
-        int count = 0;
-        while (corto_iter_hasNext(&it)) {
-            char *file = corto_iter_next(&it);
-            char *path = (dir && dir[0]) ? corto_asprintf("%s/%s", dir, file) : strdup(file);
-            if (!bake_filelist_add_intern(fl, path, offset, corto_lastmodified(path))) {
-                free(path);
-                corto_throw(NULL);
-                goto error;
-            }
-            free(path);
-            count ++;
-        }
-
-        if (!count && !corto_idmatch_hasOperators(end)) {
-            char *path = dir ? corto_asprintf("%s/%s", dir, end) : strdup(end);
-            if (!bake_filelist_add_intern(fl, path, offset, 0)) {
-                free(path);
-                corto_throw(NULL);
-                goto error;
-            }
-            free(path);
-        }
-    }
-
-   if (dir) free(dir); 
     return 0;
 error:
-    if (dir) free(dir);
     return -1;
 }
 
-corto_iter bake_filelist_iter(
+ut_iter bake_filelist_iter(
     bake_filelist *fl)
 {
-    return corto_ll_iterAlloc(fl->files);
+    return ut_ll_iterAlloc(fl->files);
 }
 
 int16_t bake_filelist_set(
     bake_filelist *fl,
     const char *pattern)
 {
-    corto_assert(fl->pattern == NULL, "setPattern invalid: filelist already set a pattern");
     fl->pattern = strdup(pattern);
+
     if (bake_filelist_populate(fl, NULL, fl->pattern)) {
         free(fl->pattern);
         fl->pattern = NULL;
@@ -178,9 +147,9 @@ int16_t bake_filelist_set(
 
 static
 int16_t bake_filelist_set_cb(
-    const char *pattern) 
+    const char *pattern)
 {
-    bake_filelist *fl = corto_tls_get(BAKE_FILELIST_KEY);
+    bake_filelist *fl = ut_tls_get(BAKE_FILELIST_KEY);
     return bake_filelist_set(fl, pattern);
 }
 
@@ -188,17 +157,15 @@ bake_filelist* bake_filelist_new(
     const char *path,
     const char *pattern)
 {
-    bake_filelist *result = corto_alloc(sizeof(bake_filelist));
-    result->pattern = pattern ? strdup(pattern) : NULL;
-    result->files = corto_ll_new();
+    bake_filelist *result = malloc(sizeof(bake_filelist));
+    if (!path) path = ".";
+    result->path = ut_strdup(path);
+    result->pattern = ut_strdup(pattern);
+    result->files = ut_ll_new();
     result->set = bake_filelist_set_cb;
 
-    /* Extract starting directory from pattern */
     if (pattern) {
-        if (bake_filelist_populate(result, NULL, result->pattern)) {
-            corto_throw(NULL);
-            goto error;
-        }
+        ut_try( bake_filelist_populate(result, path, pattern), NULL);
     }
 
     return result;
@@ -207,53 +174,64 @@ error:
     return NULL;
 }
 
-bake_file* bake_filelist_add(
+bake_file* bake_filelist_add_file(
     bake_filelist *fl,
+    const char *filepath,
     const char *file)
 {
-    corto_assert(fl != NULL, "passed NULL filelist to filelist_add");
-    corto_assert(file != NULL, "passed NULL file to filelist_add");
-    if (corto_file_test(file)) {
-        return bake_filelist_add_intern(fl, file, NULL, corto_lastmodified(file));
-    } else {
-        return bake_filelist_add_intern(fl, file, NULL, 0);
+    char *path;
+    time_t lastmodified = 0;
+
+    if (!filepath) {
+        filepath = fl->path;
     }
+
+    if ((file && file[0] == '/') || (fl->path && !strcmp(fl->path, "."))) {
+        path = ut_strdup(file);
+    } else {
+        path = ut_asprintf("%s/%s", filepath, file);
+    }
+
+    if (ut_file_test(path) == 1) {
+        lastmodified = ut_lastmodified(path);
+    }
+
+    char *name = strrchr(path, '/');
+    if (name) {
+        *name = '\0';
+        name ++;
+    } else {
+        free(path);
+        path = (char*)filepath;
+        name = (char*)file;
+    }
+
+    bake_file *result = bake_filelist_add_intern(fl, path, name, lastmodified);
+    if (path != fl->path && path != filepath) free(path);
+    return result;
 }
 
-int16_t bake_filelist_addPattern(
+int16_t bake_filelist_add_pattern(
     bake_filelist *fl,
-    const char *offset,
+    const char *path,
     const char *pattern)
 {
-    corto_assert(fl != NULL, "passed NULL to filelist_addPattern");
-    if (!fl) {
-        corto_throw("no filelist specified");
-        goto error;
+    char *search_path = (char*)path;
+    if (fl->path) {
+        search_path = ut_asprintf("%s/%s", fl->path, path);
     }
-
-    if (bake_filelist_populate(fl, offset, pattern)) {
-        corto_throw(NULL);
-        goto error;
-    }
-
-    return 0;
-error:
-    return -1;
+    int16_t result = bake_filelist_populate(fl, search_path, pattern);
+    if (search_path != path) free(search_path);
+    return result;
 }
 
-int16_t bake_filelist_addList(
+int16_t bake_filelist_merge(
     bake_filelist *fl,
     bake_filelist *src)
 {
-    corto_assert(fl != NULL, "passed NULL to filelist_addList");
-    if (!src) {
-        corto_throw("no source filelist specified");
-        goto error;
-    }
-
-    corto_iter it = corto_ll_iter(src->files);
-    while (corto_iter_hasNext(&it)) {
-        corto_ll_append(fl->files, bake_file_copy(corto_iter_next(&it)));
+    ut_iter it = ut_ll_iter(src->files);
+    while (ut_iter_hasNext(&it)) {
+        ut_ll_append(fl->files, bake_file_copy(ut_iter_next(&it)));
     }
 
     return 0;
@@ -264,6 +242,5 @@ error:
 uint64_t bake_filelist_count(
     bake_filelist *fl)
 {
-    return corto_ll_count(fl->files);
+    return ut_ll_count(fl->files);
 }
-

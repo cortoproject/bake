@@ -1,0 +1,8 @@
+{
+    "id": "bake.util",
+    "type": "package",
+    "value": {
+        "author": "Sander Mertens",
+        "description": "Bake utility functions"
+    }
+}

@@ -1,0 +1,9 @@
+{
+    "id": "bake.lang.cpp",
+    "type": "package",
+    "value": {
+        "author": "Sander Mertens",
+        "description": "Driver for building C++ projects",
+        "language": "none"
+    }
+}

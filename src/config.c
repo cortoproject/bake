@@ -1,70 +1,28 @@
+/* Copyright (c) 2010-2018 Sander Mertens
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+
 #include "bake.h"
-#include "parson.h"
 
 static
-char* bake_config_findFile(
-    char *previous_file)
-{
-    char *file = corto_getenv("BAKE_CONFIG_FILE");
-    if (file && previous_file) {
-        /* Don't go looking for files if one was explicitly specified */
-        goto error;
-    }
-
-    if (!file) {
-        char *cwd = previous_file;
-        if (!cwd) {
-            cwd = corto_strdup(corto_cwd());
-        } else {
-            char *last;
-            /* Strip file */
-            if ((last = strrchr(cwd, '/'))) last[0] = '\0';
-            else goto error;
-
-            if (!strcmp(last + 1, "config.json")) {
-                /* Strip .bake directory */
-                if ((last = strrchr(cwd, '/'))) last[0] = '\0';
-                else goto error;
-            }
-
-            /* Strip last directory */
-            if ((last = strrchr(cwd, '/'))) last[0] = '\0';
-            else goto error;
-        }
-        do {
-            file = corto_asprintf("%s/.bake", cwd);
-
-            /* If this is a .bake directory, look for config file inside of
-             * directory */
-            if (corto_isdir(file)) {
-                char *tmp = file;
-                file = corto_asprintf("%s/.bake/config.json", cwd);
-                free(tmp);
-            }
-
-            if (!corto_file_test(file)) {
-                char *last = strrchr(cwd, '/');
-                if (last) {
-                    last[0] = '\0';
-                }
-                free(file);
-                file = NULL;
-            } else {
-                break;
-            }
-        } while (strlen(cwd));
-        free(cwd);
-    } else {
-        file = corto_strdup(file);
-    }
-
-    return file;
-error:
-    return NULL;
-}
-
-static
-bool bake_config_isVarValid(
+bool bake_config_var_is_valid(
     const char *var)
 {
     const char *ptr;
@@ -78,74 +36,88 @@ bool bake_config_isVarValid(
 }
 
 static
-bool bake_config_var_set(
-    corto_ll env_set,
+int32_t bake_config_var_is_set(
+    bake_config *config,
     const char *var)
 {
-    char *var_set = NULL;
-    corto_iter it = corto_ll_iter(env_set);
-    while (corto_iter_hasNext(&it)) {
-        var_set = corto_iter_next(&it);
-        if (!strcmp(var_set, var)) {
-            break;
-        } else {
-            var_set = NULL;
+    int32_t index = 0;
+    ut_iter it = ut_ll_iter(config->env_variables);
+    while (ut_iter_hasNext(&it)) {
+        if (!strcmp(ut_iter_next(&it), var)) {
+            return index;
         }
+        index ++;
     }
 
-    return var_set != NULL;
+    return -1;
+}
+
+static
+void bake_config_add_var(
+    bake_config *config,
+    const char *var,
+    const char *val)
+{
+    int32_t index = bake_config_var_is_set(config, var);
+    if (index == -1) {
+        if (!val) val = "";
+        ut_ll_append(config->env_variables, ut_strdup(var));
+        ut_ll_append(config->env_values, ut_strdup(val));
+    } else if (val) {
+        ut_ll_set(config->env_variables, index, ut_strdup(var));
+        ut_ll_set(config->env_values, index, ut_strdup(val));
+    }
 }
 
 static
 int16_t bake_config_loadEnvironment(
     bake_config *cfg_out,
-    JSON_Object *envcfg,
-    corto_ll env_set)
+    JSON_Object *envcfg)
 {
     int i;
-    corto_log_push("load-env");
+    ut_log_push("load-env");
+
     for (i = 0; i < json_object_get_count(envcfg); i ++) {
         const char *var = json_object_get_name(envcfg, i);
-        if (!bake_config_isVarValid(var)) {
-            corto_throw("'%s' is not a valid environment variable name");
-            goto error;
+        if (!bake_config_var_is_valid(var)) {
+            ut_warning(
+                "'%s' is not a valid environment variable name, skipping", var);
+            continue;
         }
 
-        const char *value = json_object_get_string(envcfg, var);
+        /* Accept both arrays and strings */
+        const char *j_str = json_object_get_string(envcfg, var);
+        char *value = (char*)j_str;
         if (!value) {
-            corto_throw("invalid value for environment variable '%s'", var);
-            goto error;
-        }
-
-        if (env_set) {
-            if (!bake_config_var_set(env_set, var)) {
-                corto_ll_append(env_set, corto_strdup(var));
-            }
-        }
-
-        /* Shell environment takes precedence */
-        if (!corto_getenv(var)) {
-            if (corto_setenv(var, value)) {
+            JSON_Value *j_value = json_object_get_value(envcfg, var);
+            if (json_value_get_type(j_value) == JSONArray) {
+                JSON_Array *j_array = json_value_get_array(j_value);
+                ut_strbuf buf = UT_STRBUF_INIT;
+                uint32_t i, count = json_array_get_count(j_array);
+                for (i = 0; i < count; i ++) {
+                    const char *el = json_array_get_string(j_array, i);
+                    if (i) {
+                        ut_strbuf_appendstr(&buf, ":");
+                    }
+                    ut_strbuf_appendstr(&buf, el);
+                }
+                value = ut_strbuf_get(&buf);
+            } else {
+                ut_throw("invalid value for environment variable '%s'", var);
                 goto error;
             }
-            /* Add variable to list of environment variables, so it can be
-             * exported later */
-            if (strcmp(var, "BAKE_HOME") &&
-                strcmp(var, "BAKE_TARGET") &&
-                strcmp(var, "BAKE_VERSION") &&
-                strcmp(var, "BAKE_CONFIG"))
-            {
-                if (!cfg_out->variables) {
-                    cfg_out->variables = corto_ll_new();
-                }
-                corto_ll_append(cfg_out->variables, corto_strdup(var));
-            }
+        }
+
+        bake_config_add_var(cfg_out, var, value);
+        if (j_str != value) {
+            free(value);
         }
     }
-    corto_log_pop();
+
+    ut_log_pop();
     return 0;
 error:
-    corto_log_pop();
+    ut_log_pop();
     return -1;
 }
 
@@ -156,90 +128,35 @@ error:
 #define CFG_STRICT "strict"
 
 static
-int16_t bake_config_parseBool(
-    JSON_Object *obj,
-    const char *name,
-    uint32_t i,
-    bool *out)
-{
-    const char *item = json_object_get_name(obj, i);
-    if (!strcmp(item, name)) {
-        JSON_Value *v = json_object_get_value_at(obj, i);
-        if (json_value_get_type(v) == JSONBoolean)
-        {
-            *out = json_value_get_boolean(v);
-        } else {
-            corto_throw(
-                "invalid JSON: expected value of '%s' to be a boolean",
-                name);
-            goto error;
-        }
-    }
-    return 0;
-error:
-    return -1;
-}
-
-static
-int16_t bake_config_parseString(
-    JSON_Object *obj,
-    const char *name,
-    uint32_t i,
-    char **out)
-{
-    const char *item = json_object_get_name(obj, i);
-    if (!strcmp(item, name)) {
-        JSON_Value *v = json_object_get_value_at(obj, i);
-        if (json_value_get_type(v) == JSONString)
-        {
-            const char *json_string = json_value_get_string(v);
-            if (json_string) {
-                *out = corto_envparse("%s", json_string);
-            } else {
-                *out = NULL;
-            }
-        } else {
-            corto_throw(
-                "invalid JSON: expected value of '%s' to be a string",
-                name);
-            goto error;
-        }
-    }
-    return 0;
-error:
-    return -1;
-}
-
-static
 int16_t bake_config_loadConfiguration(
     JSON_Object *cfg,
     bake_config *cfg_out)
 {
-    corto_log_push("load-cfg");
+    ut_log_push("load-cfg");
     int i;
     for (i = 0; i < json_object_get_count(cfg); i++) {
-        if (bake_config_parseBool(cfg, CFG_SYMBOLS, i, &cfg_out->symbols)) {
+        JSON_Value *value = json_object_get_value_at(cfg, i);
+
+        if (bake_json_set_boolean(&cfg_out->symbols, CFG_SYMBOLS, value)) {
             goto error;
         }
-        if (bake_config_parseBool(cfg, CFG_DEBUG, i, &cfg_out->debug)) {
+        if (bake_json_set_boolean(&cfg_out->debug, CFG_DEBUG, value)) {
             goto error;
         }
-        if (bake_config_parseBool(
-            cfg, CFG_OPTIMIZATIONS, i, &cfg_out->optimizations))
-        {
+        if (bake_json_set_boolean(&cfg_out->optimizations, CFG_OPTIMIZATIONS, value)) {
             goto error;
         }
-        if (bake_config_parseBool(cfg, CFG_COVERAGE, i, &cfg_out->coverage)) {
+        if (bake_json_set_boolean(&cfg_out->coverage, CFG_COVERAGE, value)) {
             goto error;
         }
-        if (bake_config_parseBool(cfg, CFG_STRICT, i, &cfg_out->strict)) {
+        if (bake_json_set_boolean(&cfg_out->strict, CFG_STRICT, value)) {
             goto error;
         }
     }
-    corto_log_pop();
+    ut_log_pop();
     return 0;
 error:
-    corto_log_pop();
+    ut_log_pop();
     return -1;
 }
 
@@ -247,6 +164,7 @@ static
 int16_t bake_config_findSection(
     JSON_Object *object,
     const char *lookfor,
+    const char *item,
     JSON_Object **out)
 {
     JSON_Object *result = NULL;
@@ -261,7 +179,7 @@ int16_t bake_config_findSection(
             JSON_Value *section = json_object_get_value_at(object, i);
             result = json_value_get_object(section);
             if (!result) {
-                corto_throw(
+                ut_throw(
                     "invalid json: expected value of '%s' to be an object",
                     name);
                 goto error;
@@ -271,7 +189,7 @@ int16_t bake_config_findSection(
     }
 
     if (i == json_object_get_count(object)) {
-        corto_trace("section '%s' not found", lookfor);
+        ut_trace("%s '%s' not found", item, lookfor);
         goto not_found;
     }
 
@@ -285,49 +203,29 @@ error:
 }
 
 static
-int16_t bake_config_setPathVariables(
+void bake_config_appendEnv(
+    const char *env,
+    const char *value)
+{
+    char *existing = ut_getenv(env);
+    if (!existing || !strlen(existing)) {
+        ut_setenv(env, value);
+    } else {
+        ut_setenv(env, strarg("%s:%s", value, existing));
+    }
+}
+
+static
+void bake_config_setEnv(
     bake_config *cfg)
 {
-    char *path = corto_getenv("PATH");
-    if (!path || !strlen(path)) {
-        corto_setenv("PATH", strarg("~/.bake:%s", cfg->binpath));
-    } else {
-        corto_setenv(
-            "PATH", strarg("~/.bake:%s:%s",
-            cfg->binpath, path));
+    ut_iter it_var = ut_ll_iter(cfg->env_variables);
+    ut_iter it_val = ut_ll_iter(cfg->env_values);
+    while (ut_iter_hasNext(&it_var) && ut_iter_hasNext(&it_val)) {
+        char *var = ut_iter_next(&it_var);
+        char *val = ut_iter_next(&it_val);
+        ut_setenv(var, val);
     }
-
-    char *ld = corto_getenv("LD_LIBRARY_PATH");
-    if (!ld || !strlen(ld)) {
-        corto_setenv(
-            "LD_LIBRARY_PATH", strarg(".:%s", cfg->libpath));
-    } else {
-        corto_setenv(
-            "LD_LIBRARY_PATH",
-                strarg(".:%s:%s", cfg->libpath, ld));
-    }
-
-    char *dyld = corto_getenv("DYLD_LIBRARY_PATH");
-    if (!dyld || !strlen(dyld)) {
-        corto_setenv(
-            "DYLD_LIBRARY_PATH", strarg(".:%s", cfg->libpath));
-    } else {
-        corto_setenv(
-            "DYLD_LIBRARY_PATH",
-                strarg(".:%s:%s", cfg->libpath, dyld));
-    }
-
-    char *classpath = corto_getenv("CLASSPATH");
-    if (!classpath || !strlen(classpath)) {
-        corto_setenv(
-            "CLASSPATH", strarg(".:%s/java", cfg->rootpath));
-    } else {
-        corto_setenv(
-            "CLASSPATH",
-                strarg(".:%s/java:%s", cfg->rootpath, classpath));
-    }
-
-    return 0;
 }
 
 static
@@ -335,20 +233,19 @@ int16_t bake_config_load_file (
     const char *file,
     bake_config *cfg_out,
     const char *cfg_name,
-    const char *env_name,
-    corto_ll env_set)
+    const char *env_name)
 {
-    corto_ok("load configuration '%s'", file);
+    ut_ok("load configuration '%s'", file);
 
-    JSON_Value *json = json_parse_file(file);
+    JSON_Value *json = json_parse_file_with_comments(file);
     if (!json) {
-        corto_throw("failed to parse bake configuration '%s'", file);
+        ut_throw("failed to parse bake configuration '%s'", file);
         goto error;
     }
 
     JSON_Object *jsonObj = json_value_get_object(json);
     if (!jsonObj) {
-        corto_throw("invalid JSON: expected object");
+        ut_throw("invalid JSON: expected object");
         goto error;
     }
 
@@ -357,14 +254,14 @@ int16_t bake_config_load_file (
     if (env) {
         JSON_Object *section = NULL;
         if (bake_config_findSection(
-            env, env_name, &section) == -1)
+            env, env_name, "environment", &section) == -1)
         {
             goto error;
         }
         if (!section) {
             goto not_found;
         }
-        if (bake_config_loadEnvironment(cfg_out, section, env_set)) {
+        if (bake_config_loadEnvironment(cfg_out, section)) {
             goto error;
         }
     }
@@ -374,7 +271,7 @@ int16_t bake_config_load_file (
     if (cfg) {
         JSON_Object *section = NULL;
         if (bake_config_findSection(
-            cfg, cfg_name, &section) == -1)
+            cfg, cfg_name, "configuration", &section) == -1)
         {
             goto error;
         }
@@ -396,16 +293,15 @@ error:
 }
 
 static
-int16_t bake_config_load_configs(
-    corto_ll config_files,
+int16_t bake_config_load_config(
+    ut_ll config_files,
     bake_config *cfg_out,
     const char *cfg_id,
-    const char *env_id,
-    corto_ll env_set)
+    const char *env_id)
 {
     char *file;
-    while ((file = corto_ll_takeFirst(config_files))) {
-        if (bake_config_load_file(file, cfg_out, cfg_id, env_id, env_set)) {
+    while ((file = ut_ll_takeFirst(config_files))) {
+        if (bake_config_load_file(file, cfg_out, cfg_id, env_id) == -1) {
             goto error;
         }
         free(file);
@@ -417,48 +313,52 @@ error:
 }
 
 static
-corto_ll bake_config_find_configs(
+ut_ll bake_config_find_files(
     char *path)
 {
-    corto_ll config_files = NULL; /* Collect list of all config files */
+    ut_ll config_files = NULL; /* Collect list of all config files */
     char *cur_path = path;
 
-    if (path[0] == '/') {
+    char *path_parsed = ut_envparse(path);
+
+    if (path_parsed[0] == '/') {
         /* Absolute path */
-        cur_path = strdup(path);
+        cur_path = strdup(path_parsed);
     } else {
         /* Relative path */
-        cur_path = corto_asprintf("%s/%s", corto_cwd(), path);
-        corto_path_clean(cur_path, cur_path);
+        cur_path = ut_asprintf("%s/%s", ut_cwd(), path_parsed);
+        ut_path_clean(cur_path, cur_path);
     }
 
-    /* Check for a .bake in the current path */
+    free (path_parsed);
+
+    /* Check for a bake in the current path */
     char *elem = NULL;
     do {
-        char *file = corto_asprintf("%s/.bake", cur_path);
-        if (corto_file_test(file) == 1) {
-            if (corto_isdir(file)) {
-                char *cfg = corto_asprintf("%s/config.json", file);
-                if (corto_file_test(cfg)) {
-                    if (!config_files) config_files = corto_ll_new();
-                    corto_ll_append(config_files, cfg);
-                    corto_trace("using configuration file '%s'", cfg);
+        char *file = ut_asprintf("%s/bake", cur_path);
+        if (ut_file_test(file) == 1) {
+            if (ut_isdir(file)) {
+                char *cfg = ut_asprintf("%s/bake.json", file);
+                if (ut_file_test(cfg) == 1) {
+                    if (!config_files) config_files = ut_ll_new();
+                    ut_ll_append(config_files, cfg);
+                    ut_trace("using configuration file '%s'", cfg);
                 } else {
                     free(cfg);
                 }
             } else {
-                if (!config_files) config_files = corto_ll_new();
-                corto_ll_append(config_files, file);
-                corto_trace("using configuration file '%s'", file);
+                free(file);
             }
         } else {
             free(file);
         }
 
-        file = corto_asprintf("%s/bake.json", cur_path);
-        if (corto_file_test(file) == 1) {
-            corto_ll_append(config_files, file);
-            corto_trace("using configuration file '%s'", file);
+
+        file = ut_asprintf("%s/bake.json", cur_path);
+        if (ut_file_test(file) == 1) {
+            if (!config_files) config_files = ut_ll_new();
+            ut_ll_append(config_files, file);
+            ut_trace("using configuration file '%s'", file);
         } else {
             free(file);
         }
@@ -473,125 +373,285 @@ corto_ll bake_config_find_configs(
     return config_files;
 }
 
+static
+ut_ll bake_config_find_config(void)
+{
+    ut_ll config_files = NULL;
+
+    if (ut_getenv("BAKE_HOME")) {
+        char *file = ut_asprintf("%s/bake.json", ut_getenv("BAKE_HOME"));
+        if (ut_file_test(file) == 1) {
+            config_files = ut_ll_new();
+            ut_ll_append(config_files, file);
+        }
+    }
+    if (!config_files) {
+        config_files = bake_config_find_files(".");
+    }
+    if (!config_files) {
+        config_files = bake_config_find_files("~");
+    }
+
+    return config_files;
+}
+
 int16_t bake_config_load(
     bake_config *cfg_out,
     const char *cfg_id,
-    const char *env_id)
+    const char *env_id,
+    bool build_to_home)
 {
-    corto_ll env_set = NULL;
-
-    if (corto_log_verbosityGet() <= CORTO_OK) {
-        /* If verbosity level is OK or less, log environment variables set in
-         * the configuration to console. */
-        env_set = corto_ll_new();
-        corto_ll_append(env_set, corto_strdup("BAKE_HOME"));
-        corto_ll_append(env_set, corto_strdup("BAKE_TARGET"));
-        corto_ll_append(env_set, corto_strdup("BAKE_VERSION"));
-        corto_ll_append(env_set, corto_strdup("BAKE_CONFIG"));
-        corto_ll_append(env_set, corto_strdup("PATH"));
-        corto_ll_append(env_set, corto_strdup("LD_LIBRARY_PATH"));
-        if (corto_os_match("darwin")) {
-            corto_ll_append(env_set, corto_strdup("DYLD_LIBRARY_PATH"));
-        }
-    }
-
     /* Use default configuration and environment */
-    *cfg_out = (bake_config){
-        .id = cfg_id,
-        .symbols = true,
-        .debug = true,
-        .optimizations = false,
-        .coverage = false,
-        .strict = false
-    };
+    cfg_out->env_variables = ut_ll_new();
+    cfg_out->env_values = ut_ll_new();
 
-    corto_log_push("config");
+    /* Collect & load configuration files */
+    ut_ll config_files = bake_config_find_config();
 
-    /* Collect configuration files for current path */
-    corto_ll config_files = bake_config_find_configs(".");
     if (config_files) {
-        /* Load configurations */
-        if (bake_config_load_configs(
+        if (bake_config_load_config(
             config_files,
             cfg_out,
             cfg_id,
-            env_id,
-            env_set))
+            env_id))
         {
             goto error;
         }
     } else {
-        corto_info(
-            "config:environment '%s:%s' not found in path, load default config",
-            cfg_id, env_id);
+        ut_ok("no bake configuration files found, use defaults");
+    }
 
-        char *bake_home = corto_envparse("~/corto");
+    /* Set BAKE_HOME to a default value if the config didn't specify it */
+    if (!ut_getenv("BAKE_HOME")) {
+        char *bake_home = ut_envparse("~/bake");
         if (!bake_home) {
-            corto_throw(NULL);
+            ut_throw(NULL);
             goto error;
         }
 
-        corto_try (corto_setenv("BAKE_HOME", "%s", bake_home), NULL);
-        corto_try (corto_setenv("BAKE_TARGET", "%s", bake_home), NULL);
+        ut_ok("$BAKE_HOME not set, default to '%s'", bake_home);
 
+        ut_try (ut_setenv("BAKE_HOME", "%s", bake_home), NULL);
         free(bake_home);
     }
 
-    corto_setenv("BAKE_CONFIG", cfg_id);
-    corto_setenv("BAKE_ENVIRONMENT", env_id);
-    corto_setenv("BAKE_PLATFORM", CORTO_PLATFORM_STRING);
+    /* Set BAKE_TARGET to a default value if the config didn't specify it */
+    if (!ut_getenv("BAKE_TARGET")) {
+        ut_ok("$BAKE_TARGET not set, default to $BAKE_HOME");
+        ut_try (ut_setenv("BAKE_TARGET", "$BAKE_HOME"), NULL);
+    }
 
-    cfg_out->id = corto_strdup(cfg_id);
+    /* Ensure these environment variables are part of the bake environment */
+    bake_config_add_var(cfg_out, "BAKE_HOME", ut_getenv("BAKE_HOME"));
+    bake_config_add_var(cfg_out, "BAKE_TARGET", ut_getenv("BAKE_TARGET"));
+    bake_config_add_var(cfg_out, "BAKE_CONFIG", cfg_id);
+    bake_config_add_var(cfg_out, "BAKE_ENVIRONMENT", env_id);
+    bake_config_add_var(cfg_out, "BAKE_PLATFORM", UT_PLATFORM_STRING);
+    bake_config_add_var(cfg_out, "PATH", ut_getenv("PATH"));
+    bake_config_add_var(cfg_out, "LD_LIBRARY_PATH", NULL);
+    bake_config_add_var(cfg_out, "CLASSPATH", NULL);
+    if (ut_os_match("darwin")) {
+        bake_config_add_var(cfg_out, "DYLD_LIBRARY_PATH", NULL);
+    }
 
-    cfg_out->rootpath = corto_asprintf(
-        "%s/%s/%s-%s",
-        corto_getenv("BAKE_TARGET"),
-        corto_getenv("BAKE_VERSION"),
-        corto_getenv("BAKE_PLATFORM"),
-        cfg_out->id);
+    /* Ensure that these environment variables are set, so no errors are thrown
+     * when they are referenced by the configuration */
+    if (!ut_getenv("PATH"))            ut_setenv("PATH", "");
+    if (!ut_getenv("LD_LIBRARY_PATH")) ut_setenv("LD_LIBRARY_PATH", "");
+    if (!ut_getenv("CLASSPATH"))       ut_setenv("CLASSPATH", "");
+    if (ut_os_match("darwin")) {
+        if (!ut_getenv("DYLD_LIBRARY_PATH")) ut_setenv("DYLD_LIBRARY_PATH", "");
+    }
 
-    cfg_out->homepath = corto_asprintf(
-        "%s/%s/%s-%s",
-        corto_getenv("BAKE_HOME"),
-        corto_getenv("BAKE_VERSION"),
-        corto_getenv("BAKE_PLATFORM"),
-        cfg_out->id);
+    /* Set configured environment variables */
+    bake_config_setEnv(cfg_out);
 
-    cfg_out->libpath = corto_asprintf(
-        "%s/lib", cfg_out->rootpath);
+    /* Precompute bake paths */
+    cfg_out->configuration = ut_strdup(cfg_id);
+    if (!build_to_home) {
+        cfg_out->target = ut_asprintf(
+            "%s/%s-%s", ut_getenv("BAKE_TARGET"),
+            UT_PLATFORM_STRING, cfg_out->configuration);
+    } else {
+        cfg_out->target = ut_strdup(ut_getenv("BAKE_HOME"));
+    }
 
-    cfg_out->binpath = corto_asprintf(
-        "%s/bin", cfg_out->rootpath);
+    cfg_out->home = ut_strdup(ut_getenv("BAKE_HOME"));
+    cfg_out->home_lib = ut_asprintf("%s/lib", cfg_out->home);
+    cfg_out->home_bin = ut_asprintf("%s/bin", cfg_out->home);
+    cfg_out->target_lib = ut_asprintf("%s/lib", cfg_out->target);
+    cfg_out->target_bin = ut_asprintf("%s/bin", cfg_out->target);
 
-    /* Set environment variables for searching binaries and libs */
-    if (bake_config_setPathVariables(cfg_out)) {
+    /* Append bake environment to PATH. (DY)LD_LIBRARY_PATH and CLASSPATH */
+    bake_config_appendEnv("PATH", strarg("~/bake:%s:%s", cfg_out->target_bin, cfg_out->home_bin));
+    bake_config_appendEnv("LD_LIBRARY_PATH", strarg(".:%s:%s", cfg_out->target_lib, cfg_out->home_lib));
+    bake_config_appendEnv("DYLD_LIBRARY_PATH", strarg(".:%s:%s", cfg_out->target_lib, cfg_out->home_lib));
+    bake_config_appendEnv("CLASSPATH", strarg(".:%s/java", cfg_out->target));
+
+    if (ut_log_verbosityGet() <= UT_OK) {
+        ut_log_push("environment");
+        ut_iter it = ut_ll_iter(cfg_out->env_variables);
+        while (ut_iter_hasNext(&it)) {
+            char *env = ut_iter_next(&it);
+            ut_trace("set '%s' to '%s'", env, ut_getenv(env));
+        }
+        ut_log_pop();
+
+        ut_log_push("configuration");
+        ut_trace("set '%s' to '%s'", CFG_SYMBOLS, cfg_out->symbols ? "true" : "false");
+        ut_trace("set '%s' to '%s'", CFG_DEBUG, cfg_out->debug ? "true" : "false");
+        ut_trace("set '%s' to '%s'", CFG_OPTIMIZATIONS, cfg_out->optimizations ? "true" : "false");
+        ut_trace("set '%s' to '%s'", CFG_COVERAGE, cfg_out->coverage ? "true" : "false");
+        ut_trace("set '%s' to '%s'", CFG_STRICT, cfg_out->strict ? "true" : "false");
+        ut_log_pop();
+    }
+
+    return 0;
+error:
+    ut_log_pop();
+    return -1;
+}
+
+int16_t bake_config_export(
+    bake_config *cfg,
+    const char *expr)
+{
+    bool is_add = false;
+    char *var = ut_strdup(expr), *value = NULL;
+
+    value = strrchr(var, '=');
+    if (value) {
+        if (value == expr) {
+            ut_throw("missing variable name in export expression");
+            goto error;
+        }
+
+        if (value[-1] == '+') {
+            is_add = true;
+            if (value - 1 == expr) {
+                ut_throw("missing variable name in export expression");
+                goto error;
+            }
+            value[-1] = '\0';
+        } else {
+            value[0] = '\0';
+        }
+        value ++;
+    }
+
+    char *bake_json = ut_envparse("$BAKE_HOME/bake.json");
+
+    if (ut_file_test(bake_json) != 1) {
+        FILE *f = fopen(bake_json, "w");
+        fprintf(f,
+            "{\"environment\":{}}"
+        );
+        fclose(f);
+    }
+
+    JSON_Value *root = json_parse_file_with_comments(bake_json);
+    if (!root) {
+        ut_throw("failed to parse file '%s'", bake_json);
         goto error;
     }
 
-    if (corto_log_verbosityGet() <= CORTO_OK) {
-        corto_log_push("environment");
-
-        corto_iter it = corto_ll_iter(env_set);
-        while (corto_iter_hasNext(&it)) {
-            char *env = corto_iter_next(&it);
-            corto_ok("set '%s' to '%s'", env, corto_getenv(env));
-        }
-
-        corto_log_pop();
-
-        corto_log_push("configuration");
-        corto_ok("set '%s' to '%s'", CFG_SYMBOLS, cfg_out->symbols ? "true" : "false");
-        corto_ok("set '%s' to '%s'", CFG_DEBUG, cfg_out->debug ? "true" : "false");
-        corto_ok("set '%s' to '%s'", CFG_OPTIMIZATIONS, cfg_out->optimizations ? "true" : "false");
-        corto_ok("set '%s' to '%s'", CFG_COVERAGE, cfg_out->coverage ? "true" : "false");
-        corto_ok("set '%s' to '%s'", CFG_STRICT, cfg_out->strict ? "true" : "false");
-        corto_log_pop();
+    JSON_Object *root_obj = json_value_get_object(root);
+    if (!root_obj) {
+        ut_throw("expected JSON object as root of file '%s'", bake_json);
+        goto error;
     }
 
+    JSON_Object *env = bake_json_find_or_create_object(root_obj, "environment");
+    if (!env) {
+        goto error;
+    }
 
-    corto_log_pop();
+    JSON_Object *cur = bake_json_find_or_create_object(env, cfg->environment);
+    if (!cur) {
+        goto error;
+    }
+
+    JSON_Value *val = json_object_get_value(cur, var);
+
+    if (!is_add) {
+        if (json_value_get_type(val) != JSONString) {
+            json_object_remove(cur, var);
+        }
+        json_object_set_string(cur, var, value);
+    } else {
+        if (json_value_get_type(val) != JSONArray) {
+            json_object_remove(cur, var);
+            json_object_set_value(cur, var, json_value_init_array());
+            val = json_object_get_value(cur, var);
+        }
+        JSON_Array *array = json_value_get_array(val);
+
+        /* Don't add duplicate values */
+        int32_t i;
+        for (i = 0; i < json_array_get_count(array); i ++) {
+            const char *str = json_array_get_string(array, i);
+            if (!strcmp(str, value)) {
+                break;
+            }
+        }
+
+        if (i == json_array_get_count(array)) {
+            json_array_append_string(array, value);
+        }
+    }
+
+    json_set_escape_slashes(0);
+
+    json_serialize_to_file_pretty(root, bake_json);
+
     return 0;
 error:
-    corto_log_pop();
+    return -1;
+}
+
+int16_t bake_config_unset(
+    bake_config *cfg,
+    const char *var)
+{
+    char *bake_json = ut_envparse("$BAKE_HOME/bake.json");
+
+    if (ut_file_test(bake_json) != 1) {
+        FILE *f = fopen(bake_json, "w");
+        fprintf(f,
+            "{\"environment\":{}}"
+        );
+        fclose(f);
+    }
+
+    JSON_Value *root = json_parse_file_with_comments(bake_json);
+    if (!root) {
+        ut_throw("failed to parse file '%s'", bake_json);
+        goto error;
+    }
+
+    JSON_Object *root_obj = json_value_get_object(root);
+    if (!root_obj) {
+        ut_throw("expected JSON object as root of file '%s'", bake_json);
+        goto error;
+    }
+
+    JSON_Object *env = bake_json_find_or_create_object(root_obj, "environment");
+    if (!env) {
+        goto error;
+    }
+
+    JSON_Object *cur = bake_json_find_or_create_object(env, cfg->environment);
+    if (!cur) {
+        goto error;
+    }
+
+    json_object_remove(cur, var);
+
+    json_set_escape_slashes(0);
+
+    json_serialize_to_file_pretty(root, bake_json);
+
+    return 0;
+error:
     return -1;
 }

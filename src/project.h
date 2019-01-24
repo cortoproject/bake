@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 the corto developers
+/* Copyright (c) 2010-2018 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -19,62 +19,106 @@
  * THE SOFTWARE.
  */
 
+/** Create new project */
 bake_project* bake_project_new(
     const char *path,
     bake_config *cfg);
 
+/* Initialize project that wasn't loaded from a project.json */
+int16_t bake_project_init(
+    bake_config *config,
+    bake_project *project);
+
+/** Cleanup project */
 void bake_project_free(
     bake_project *p);
 
-char* bake_project_binaryPath(
-    bake_project *p);
+/* Parse configuration of drivers */
+int bake_project_parse_driver_config(
+    bake_config *config,
+    bake_project *project);
 
-char* bake_project_includePath(
-    bake_project *p);
+/* Init driver */
+int bake_project_init_drivers(
+    bake_config *config,
+    bake_project *project);
 
-char* bake_project_etcPath(
-    bake_project *p);
+/* Parse configuration from dependees */
+int16_t bake_project_parse_dependee_config(
+    bake_config *config,
+    bake_project *project);
 
-void bake_project_addSource(
-    bake_project *p,
-    const char *source);
+/* Check if project dependencies are newer */
+int16_t bake_project_check_dependencies(
+    bake_config *config,
+    bake_project *project);
 
-void bake_project_addInclude(
-    bake_project *p,
-    const char *include);
+/* Generate code */
+int16_t bake_project_generate(
+    bake_config *config,
+    bake_project *project);
 
-void bake_project_use(
-    bake_project *p,
-    const char *use);
+/* Prebuild step */
+int16_t bake_project_prebuild(
+    bake_config *config,
+    bake_project *project);
 
-void bake_project_use_private(
-    bake_project *p,
-    const char *use);
+/* Postbuild step */
+int16_t bake_project_postbuild(
+    bake_config *config,
+    bake_project *project);
 
-void bake_project_link(
-    bake_project *p,
-    const char *use);
+/* Build project */
+int16_t bake_project_build(
+    bake_config *config,
+    bake_project *project);
 
-char *bake_project_definitionFile(
-    bake_project *p);
+/* Clean project */
+int16_t bake_project_clean(
+    bake_config *config,
+    bake_project *project);
 
-int16_t bake_project_parse_attributes(
-    bake_project *p);
+/* Initialize files for a new bake project */
+int16_t bake_project_setup(
+    bake_config *config,
+    bake_project *project);
 
-int16_t bake_project_parse_dependee_attributes(
-    bake_project *p);
+/* Only clean current platform (used by rebuild) */
+int16_t bake_project_clean_current_platform(
+    bake_config *config,
+    bake_project *project);
 
-int16_t bake_project_loadDependeeConfig(
-    bake_project *p,
-    const char *package_id,
+/* Initialize files for a new bake project */
+int16_t bake_project_should_ignore(
+    bake_project *project,
     const char *file);
 
-int16_t bake_project_add_generated_dependencies(
-    bake_project *p);
+/* Get driver specific attribute */
+bake_attr* bake_project_get_attr(
+    bake_project *project,
+    const char *driver_id,
+    const char *attr);
 
-bool bake_project_is_generated_package(
-    bake_project *p,
-    const char *dependency);
+/* Set string attribute value */
+bake_attr* bake_project_set_attr_string(
+    bake_config *config,
+    bake_project *project,
+    const char *driver_id,
+    const char *attr,
+    const char *value);
 
-int16_t bake_project_resolveLinks(
-    bake_project *p);
+/* Set bool attribute value */
+bake_attr* bake_project_set_attr_bool(
+    bake_config *config,
+    bake_project *project,
+    const char *driver_id,
+    const char *attr,
+    bool value);
+
+/* Add value to array attribute */
+bake_attr* bake_project_set_attr_array(
+    bake_config *config,
+    bake_project *project,
+    const char *driver_id,
+    const char *attr,
+    const char *value);

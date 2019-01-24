@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 the corto developers
+/* Copyright (c) 2010-2018 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -21,15 +21,33 @@
 
 #include "bake.h"
 
+bake_node* bake_node_find(
+    bake_driver *driver,
+    const char *name)
+{
+    ut_iter it = ut_ll_iter(driver->nodes);
+    bake_node *result = NULL;
+
+    while (ut_iter_hasNext(&it)) {
+        bake_node *e = ut_iter_next(&it);
+        if (!strcmp(e->name, name)) {
+            result = e;
+            break;
+        }
+    }
+
+    return result;
+}
+
 bake_pattern* bake_pattern_new(
     const char *name,
     const char *pattern)
 {
-    bake_pattern *result = corto_calloc(sizeof(bake_pattern));
+    bake_pattern *result = ut_calloc(sizeof(bake_pattern));
     result->super.kind = BAKE_RULE_PATTERN;
     result->super.name = name;
     result->super.cond = NULL;
-    result->pattern = pattern ? corto_strdup(pattern) : NULL;
+    result->pattern = pattern ? ut_strdup(pattern) : NULL;
     return result;
 }
 
@@ -39,7 +57,7 @@ bake_rule* bake_rule_new(
     bake_rule_target target,
     bake_rule_action_cb action)
 {
-    bake_rule *result = corto_calloc(sizeof(bake_rule));
+    bake_rule *result = ut_calloc(sizeof(bake_rule));
     result->super.kind = BAKE_RULE_RULE;
     result->super.name = name;
     result->super.cond = NULL;
@@ -55,9 +73,9 @@ bake_dependency_rule* bake_dependency_rule_new(
     bake_rule_target dep_mapping,
     bake_rule_action_cb action)
 {
-    bake_dependency_rule *result = corto_calloc(sizeof(bake_dependency_rule));
+    bake_dependency_rule *result = ut_calloc(sizeof(bake_dependency_rule));
     result->super.name = name;
-    result->super.cond = NULL;    
+    result->super.cond = NULL;
     result->target = dep_mapping;
     result->deps = deps;
     result->action = action;
@@ -68,8 +86,352 @@ bake_file* bake_file_new(
     const char *name,
     uint64_t timestamp)
 {
-    bake_file *result = corto_calloc(sizeof(bake_file));
-    result->name = strdup(name);
+    bake_file *result = ut_calloc(sizeof(bake_file));
+    result->name = ut_strdup(name);
     result->timestamp = timestamp;
     return result;
+}
+
+static
+int16_t bake_assertPathForFile(
+    char *path)
+{
+    if (!ut_file_test(path)) {
+        ut_try (ut_mkdir(path), NULL);
+    }
+
+    return 0;
+error:
+    return -1;
+}
+
+static
+bake_filelist* bake_node_eval_pattern(
+    bake_node *n,
+    bake_project *p)
+{
+    bool isSources = false;
+    bake_filelist *targets = NULL;
+
+    if (n->name && !stricmp(n->name, "SOURCES")) {
+        targets = bake_filelist_new(p->path, NULL); /* Create empty list */
+        isSources = true;
+
+        /* If this is the special SOURCES rule, apply the pattern to
+         * every configured source directory */
+        ut_iter it = ut_ll_iter(p->sources);
+        ut_dirstack ds = NULL;
+        while (ut_iter_hasNext(&it)) {
+            char *src = ut_iter_next(&it);
+            ut_try ( bake_filelist_add_pattern(
+                    targets, src, ((bake_pattern*)n)->pattern), NULL);
+        }
+
+        /* Add generated sources to list of files to compile */
+        it = bake_filelist_iter(p->generated_sources);
+        while (ut_iter_hasNext(&it)) {
+            bake_file *src = ut_iter_next(&it);
+            bake_filelist_add_file(targets, src->path, src->name);
+        }
+
+    } else if (((bake_pattern*)n)->pattern) {
+        /* If this is a regular pattern, match against project directory */
+        targets = bake_filelist_new(p->path, ((bake_pattern*)n)->pattern);
+    }
+
+    if (!targets) {
+        goto error;
+    }
+
+    return targets;
+error:
+    return NULL;
+}
+
+static
+int16_t bake_node_run_rule_map(
+    bake_driver *driver,
+    bake_project *p,
+    bake_config *c,
+    bake_rule *r,
+    bake_filelist *inputs,
+    bake_filelist *targets)
+{
+    ut_iter it = bake_filelist_iter(inputs);
+    int count = 0;
+    while (ut_iter_hasNext(&it)) {
+        bake_file *src = ut_iter_next(&it);
+        bake_file *dst = NULL;
+        const char *map = r->target.is.map(&bake_driver_api_impl, c, p, src->name);
+        if (!map) {
+            ut_throw("failed to map file '%s'", src->name);
+            goto error;
+        }
+        if (!(dst = bake_filelist_add_file(targets, NULL, map))) {
+            ut_throw(NULL);
+            goto error;
+        }
+
+        count ++;
+        if (src->timestamp > dst->timestamp) {
+            ut_log_overwrite(UT_OK, "#[green][#[white]%lld%%#[green]]#[white] %s",
+                100 * count / bake_filelist_count(inputs),
+                src->name);
+
+            /* Make sure target directory exists */
+            ut_try (bake_assertPathForFile(dst->path), NULL);
+
+            /* Invoke action */
+            char *srcPath = src->name;
+            if (src->path) {
+                srcPath = ut_asprintf("%s/%s", src->path, src->name);
+            }
+            r->action(&bake_driver_api_impl, c, p, srcPath, dst->file_path);
+            if (srcPath != src->name) {
+                free(srcPath);
+            }
+
+            /* Check if error flag was set */
+            if (p->error) {
+                ut_throw("command for task '%s' failed", src->name);
+                goto error;
+            } else {
+                p->freshly_baked = true;
+                p->changed = true;
+            }
+
+            /* Update target with latest timestamp */
+            if (ut_file_test(dst->name) == 1) {
+                dst->timestamp = ut_lastmodified(dst->name);
+            } else {
+                dst->timestamp = 0;
+            }
+        } else {
+            ut_trace("#[grey][%3lld%%] %s",
+                100 * count / bake_filelist_count(inputs),
+                src->name);
+        }
+    }
+
+    return 0;
+error:
+    return -1;
+}
+
+static
+int16_t bake_node_run_rule_pattern(
+    bake_driver *driver,
+    bake_project *p,
+    bake_config *c,
+    bake_rule *r,
+    bake_filelist *inputs,
+    bake_filelist *targets,
+    bool shouldBuild)
+{
+    /* Do n-to-n comparison between sources and targets. If the
+     * target list is empty, it is possible that files still have to
+     * be generated, in which case the rule must be executed. */
+    if (!shouldBuild) {
+        if (!targets || !bake_filelist_count(targets)) {
+            shouldBuild = true;
+            ut_trace("no targets found for rule '%s', rebuilding",
+                ((bake_node*)r)->name);
+        } else {
+            ut_iter src_iter = bake_filelist_iter(inputs);
+            while (!shouldBuild && ut_iter_hasNext(&src_iter)) {
+                bake_file *src = ut_iter_next(&src_iter);
+
+                ut_iter dst_iter = bake_filelist_iter(targets);
+                while (!shouldBuild && ut_iter_hasNext(&dst_iter)) {
+                    bake_file *dst = ut_iter_next(&dst_iter);
+                    if (!src->timestamp) {
+                        shouldBuild = true;
+                        ut_trace("#[grey]%s does not exist for %s, rebuilding",
+                            dst->name,
+                            ((bake_node*)r)->name);
+                    } else if (src->timestamp > dst->timestamp) {
+                        shouldBuild = true;
+                        ut_trace("#[grey]%s is newer than %s, rebuilding",
+                            src->name,
+                            dst->name);
+                    }
+                }
+            }
+        }
+    }
+
+    char *dst = NULL;
+    if (bake_filelist_count(targets) == 1) {
+        bake_file *f = ut_ll_get(targets->files, 0);
+        bake_assertPathForFile(f->path);
+        dst = f->file_path;
+    }
+
+    if (shouldBuild && inputs && bake_filelist_count(inputs)) {
+        ut_strbuf source_list = UT_STRBUF_INIT;
+        ut_iter src_iter = bake_filelist_iter(inputs);
+        int count = 0;
+        while (ut_iter_hasNext(&src_iter)) {
+            bake_file *src = ut_iter_next(&src_iter);
+            if (count) {
+                ut_strbuf_appendstr(&source_list, " ");
+            }
+            ut_strbuf_appendstr(&source_list, src->file_path);
+            count ++;
+        }
+
+        char *source_list_str = ut_strbuf_get(&source_list);
+
+        if (dst) {
+            ut_ok("#[bold]%s#[normal]", dst);
+        } else {
+            ut_ok("from #[bold]%s#[normal]", source_list_str);
+        }
+
+        r->action(&bake_driver_api_impl, c, p, source_list_str, dst);
+        if (p->error) {
+            if (dst) {
+                ut_throw("command for task '%s' failed", dst);
+            } else {
+                ut_throw("rule failed");
+            }
+            free(source_list_str);
+            ut_throw(NULL);
+            goto error;
+        } else {
+            p->freshly_baked = true;
+            p->changed = true;
+        }
+
+        free(source_list_str);
+    } else if (dst) {
+        ut_trace("#[grey]%s", dst);
+    }
+
+    return 0;
+error:
+    return -1;
+}
+
+int16_t bake_node_eval(
+    bake_driver *driver,
+    bake_node *n,
+    bake_project *p,
+    bake_config *c,
+    bake_filelist *inherits,
+    bake_filelist *outputs)
+{
+    bake_filelist *targets = NULL, *inputs = NULL;
+
+    if (n->cond && !n->cond(&bake_driver_api_impl, c, p)) {
+        return 0;
+    }
+
+    ut_log_push((char*)n->name);
+
+    if (n->kind == BAKE_RULE_PATTERN) {
+        targets = bake_node_eval_pattern(n, p);
+        if (!targets) {
+            targets = inherits;
+        }
+    } else {
+        targets = inherits;
+    }
+
+    /* Collect input files for node */
+    if (n->deps) {
+        bake_filelist *inputs = bake_filelist_new(p->path, NULL);
+        ut_try (!inputs, NULL);
+
+        ut_log_push("in");
+
+        /* Evaluate dependencies of node & collect its inputs */
+        ut_iter it = ut_ll_iter(n->deps);
+        while (ut_iter_hasNext(&it)) {
+            bake_node *e = ut_iter_next(&it);
+            if (bake_node_eval(driver, e, p, c, targets, inputs)) {
+                ut_throw("dependency '%s' failed", e->name);
+                goto error;
+            }
+        }
+
+        ut_log_pop();
+
+        /* Generate target files */
+        if (n->kind == BAKE_RULE_RULE) {
+            bake_rule *r = (bake_rule*)n;
+
+            /* When rule specifies a map, generate targets from inputs */
+            if (r->target.kind == BAKE_RULE_TARGET_MAP) {
+                targets = bake_filelist_new(p->path, NULL);
+                ut_try (!targets, NULL);
+
+                ut_log_push("out");
+                ut_try (
+                    bake_node_run_rule_map(driver, p, c, r, inputs, targets),
+                    NULL);
+                ut_log_pop();
+
+            /* When rule specifies a pattern, generate targets from pattern */
+            } else if (r->target.kind == BAKE_RULE_TARGET_PATTERN) {
+                bool shouldBuild = false;
+
+                if (!r->target.is.pattern || (r->target.is.pattern[0] == '$' && inherits)) {
+                    targets = inherits;
+                } else {
+                    char *pattern = ut_strdup(r->target.is.pattern);
+                    targets = bake_filelist_new(p->path, NULL);
+
+                    ut_log_push("out");
+
+                    char *tok = strtok(pattern, ",");
+                    while (tok) {
+                        bake_node *targetNode = bake_node_find(driver, &tok[1]);
+                        if (!targetNode->cond || targetNode->cond(&bake_driver_api_impl, c, p)) {
+                            bake_filelist *list = bake_filelist_new(
+                                p->path, ((bake_pattern*)targetNode)->pattern);
+                            if (!list || !bake_filelist_count(list)) {
+                                ut_trace(
+                                   "#[grey]no targets matched by '%s', need to rebuild '%s'",
+                                    tok,
+                                    n->name);
+                                shouldBuild = true;
+                            } else {
+                                bake_filelist_merge(targets, list);
+                                bake_filelist_free(list);
+                            }
+                        }
+                        tok = strtok(NULL, ",");
+                    }
+                    free(pattern);
+
+                    ut_log_pop();
+                }
+
+                if (!targets && !bake_filelist_count(inputs)) {
+                    ut_throw("no targets for rule");
+                    goto error;
+                }
+
+                if (!targets) {
+                    targets = bake_filelist_new(p->path, NULL);
+                }
+
+                ut_try (bake_node_run_rule_pattern(
+                    driver, p, c, r, inputs, targets, shouldBuild), NULL);
+            }
+        }
+    }
+
+    /* Add targets to list of outputs (inputs for parent node) */
+    if (outputs && targets) {
+        bake_filelist_merge(outputs, targets);
+    }
+
+    ut_log_pop();
+
+    return 0;
+error:
+    ut_log_pop();
+    return -1;
 }
