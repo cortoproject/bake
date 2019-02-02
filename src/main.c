@@ -44,12 +44,14 @@ bake_project_type type = BAKE_APPLICATION;
 const char *artefact = NULL;
 const char *includes = NULL;
 const char *language = NULL;
+const char *template = NULL;
 
 /* Command specific parameters */
 const char *export_expr = NULL;
 const char *publish_cmd = NULL;
 bool interactive = false;
 int run_argc = 0;
+bool clean_missing = false;
 const char **run_argv = NULL;
 const char *foreach_cmd = NULL;
 const char *list_filter = NULL;
@@ -86,21 +88,23 @@ void bake_usage(void)
     printf("  --optimize                   Manually enable compiler optimizations\n");
     printf("\n");
     printf("  --id <project id>            Manually specify a project id\n");
-    printf("  --type <package|application> Manually specify a project type (default = \"application\")\n");
+    printf("  --type <package|template>    Manually specify a project type (default = \"application\")\n");
     printf("  --package                    Manually set the project type to package\n");
     printf("  --language <language>        Manually specify a language for project (default = \"c\")\n");
     printf("  --artefact <binary>          Manually specify a binary file for project\n");
     printf("  --includes <include path>    Manually specify an include path for project\n");
     printf("\n");
-    printf("  --interactive                Rebuild project when files change (use with bake run)\n");
-    printf("  -a,--args [arguments]        Pass arguments to application ran with bake run\n");
+    printf("  --interactive                Rebuild project when files change (use w/run)\n");
+    printf("  -a,--args [arguments]        Pass arguments to application (use w/run)\n");
+    printf("  -t,--template [id]           Specify template for new project\n");
+    printf("  --missing                    Uninstall projects with missing binaries or errors (use w/uninstall)\n");
     printf("\n");
     printf("  -v,--verbosity <kind>        Set verbosity level (DEBUG, TRACE, OK, INFO, WARNING, ERROR, CRITICAL)\n");
     printf("  --trace                      Set verbosity to TRACE\n");
     printf("\n");
     printf("Commands:\n");
-    printf("  init [path]                  Initialize new bake project\n");
-    printf("  run [path|project id]         Build & run project\n");
+    printf("  new [path]                   Initialize new bake project\n");
+    printf("  run [path|project id]        Build & run project\n");
     printf("  build [path]                 Build a project (default command)\n");
     printf("  rebuild [path]               Clean and build a project\n");
     printf("  clean [path]                 Clean a project\n");
@@ -109,30 +113,32 @@ void bake_usage(void)
     printf("  uninstall [project id]       Remove project from bake environment\n");
     printf("  clone <git url>              Clone and build git repository and dependencies\n");
     printf("  update [project id]          Update an installed package or application\n");
+    printf("  foreach <cmd>                Run command for each discovered project\n");
     printf("\n");
     printf("  env                          Echo bake environment\n");
     printf("  upgrade                      Upgrade to new bake version\n");
     printf("  export <NAME>=|+=<VALUE>     Add variable to bake environment\n");
     printf("\n");
-    printf("  locate <package id>          Locate and diagnose a project in the bake environment\n");
+    printf("  info <package id>            Display info on a project in the bake environment\n");
     printf("  list [filter]                List packages in bake environment\n");
     printf("\n");
     printf("Examples:\n");
     printf("  bake                         Build all projects discovered in current directory\n");
     printf("  bake my_app                  Build all projects discovered in my_app directory\n");
-    printf("  bake init                    Initialize new application project in current directory\n");
-    printf("  bake init my_app             Initialize new application project in directory my_app\n");
-    printf("  bake init my_lib --package   Initialize new package project in directory my_lib\n");
+    printf("  bake new                     Create new application project in current directory\n");
+    printf("  bake new my_app              Create new application project in directory my_app\n");
+    printf("  bake new my_lib --package    Create new package project in directory my_lib\n");
+    printf("  bake new game -t sdl2.basic  Create new project from the sdl2.basic template\n");
     printf("  bake run my_app -a hello     Run my_app project, pass 'hello' as argument\n");
     printf("  bake publish major           Increase major project version, create git tag\n");
-    printf("  bake locate foo.bar          Locate package foo.bar\n");
+    printf("  bake info foo.bar            Show information about package foo.bar\n");
     printf("  bake list foo.*              List all packages that start with foo.\n");
     printf("\n");
 }
 
 void bake_version(void)
 {
-    printf("bake version 2.1.2 (%s %s %s)\n",
+    printf("bake version 2.2.0 (%s %s %s)\n",
         UT_PLATFORM_STRING,
         __DATE__,
         __TIME__);
@@ -171,6 +177,7 @@ bake_project_type bake_parse_project_type(
     if (!strcmp(type, "application")) return BAKE_APPLICATION;
     if (!strcmp(type, "package")) return BAKE_PACKAGE;
     if (!strcmp(type, "tool")) return BAKE_TOOL;
+    if (!strcmp(type, "template")) return BAKE_TEMPLATE;
     ut_throw("'%s' is not a valid project kind", type);
     return 0;
 }
@@ -192,12 +199,12 @@ int16_t bake_init_action(
 
     if (!strcmp(arg, "env") ||
         !strcmp(arg, "setup") ||
-        !strcmp(arg, "init") ||
+        !strcmp(arg, "new") ||
         !strcmp(arg, "run") ||
         !strcmp(arg, "uninstall") ||
         !strcmp(arg, "upgrade") ||
         !strcmp(arg, "publish") ||
-        !strcmp(arg, "locate") ||
+        !strcmp(arg, "info") ||
         !strcmp(arg, "list") ||
         !strcmp(arg, "export") ||
         !strcmp(arg, "unset"))
@@ -226,6 +233,13 @@ int bake_parse_args(
 
     const char *arg = argv[i];
     if (arg && arg[0] != '-') {
+        if (!strcmp(arg, "init")) {
+            ut_warning("bake init command deprecated, use bake new");
+            arg = "new";
+        } else if (!strcmp(arg, "locate")) {
+            ut_warning("bake locate command deprecated, use bake info");
+            arg = "info";
+        }
         if (!bake_init_action(arg)) {
             action = arg;
             i ++;
@@ -250,12 +264,14 @@ int bake_parse_args(
             ARG(0, "id", id = argv[i + 1]; i ++);
             ARG(0, "type", ut_try(!(type = bake_parse_project_type(argv[i + 1])), NULL); i ++);
             ARG(0, "package", type = BAKE_PACKAGE);
+            ARG('t', "template", template = argv[i + 1]; i ++);
             ARG(0, "language", language = argv[i + 1]; i ++);
             ARG(0, "artefact", artefact = argv[i + 1]; i ++);
             ARG(0, "includes", includes = argv[i + 1]; i ++);
 
             ARG(0, "local-setup", local_setup = true; i ++);
             ARG(0, "interactive", interactive = true; i ++);
+            ARG(0, "missing", clean_missing = true; i ++);
             ARG('a', "args", run_argc = argc - i; run_argv = &argv[i + 1]; break);
 
             ARG('h', "help", bake_usage(); action = NULL; i ++);
@@ -504,7 +520,11 @@ int bake_init_project(
     }
 
     /* Setup all project files, include invoking driver */
-    ut_try( bake_project_setup(config, project), NULL);
+    if (template) {
+        ut_try( bake_project_setup_w_template(config, project, template), NULL);
+    } else {
+        ut_try( bake_project_setup(config, project), NULL);
+    }
 
     /* Install project metadata to bake env so it is discoverable by id */
     ut_try (bake_install_metadata(config, project), NULL);
@@ -542,12 +562,13 @@ error:
     return -1;
 }
 
-int bake_locate(
+int bake_info(
     bake_config *config,
     const char *id,
     const char *env,
     bool test_lib,
-    bake_project_type *type_out)
+    bake_project_type *type_out,
+    bool clean_missing)
 {
     const char *bin = ut_locate(id, NULL, UT_LOCATE_BIN);
     if (!bin) {
@@ -577,8 +598,10 @@ int bake_locate(
                     bake_project_free(project);
                     goto error;
                 } else {
-                    ut_log("C  #[normal]%s #[grey]=> #[cyan]%s#[normal]\n",
-                        id, env ? env : path);
+                    if (!clean_missing) {
+                        ut_log("C  #[normal]%s #[grey]=> #[cyan]%s#[normal]\n",
+                            id, env ? env : path);
+                    }
                     bake_project_free(project);
 
                     if (type_out) *type_out = BAKE_PACKAGE;
@@ -595,15 +618,17 @@ int bake_locate(
             if (test_lib && !dl) {
                 ut_log("P  #[normal]%s #[grey]=> #[cyan]%s#[normal] #[red]!load error!\n",
                     id, env ? env : bin);
-                ut_log("   #[grey]%s\n", ut_dl_error());
+                ut_log("   %s\n", ut_dl_error());
                 goto error;
             } else {
-                ut_log("P  #[normal]%s #[grey]=> #[cyan]%s#[normal]\n",
-                    id, env ? env : bin);
+                if (!clean_missing) {
+                    ut_log("P  #[normal]%s #[grey]=> #[cyan]%s#[normal]\n",
+                        id, env ? env : bin);
+                }
                 if (dl) ut_dl_close(dl);
                 if (type_out) *type_out = BAKE_PACKAGE;
             }
-        } else {
+        } else if (!clean_missing) {
             const char *lib_static = ut_locate(id, NULL, UT_LOCATE_STATIC);
             if (lib_static) {
                 ut_log("S  #[normal]%s #[grey]=> #[cyan]%s#[normal]\n",
@@ -619,6 +644,10 @@ int bake_locate(
 
     return 0;
 error:
+    if (clean_missing) {
+        ut_log("#[grey]uninstall '%s'#[normal]\n", id);
+        bake_install_uninstall(config, id);
+    }
     return -1;
 }
 
@@ -661,13 +690,15 @@ char* bake_print_env(
 }
 
 int bake_list(
-    bake_config *config)
+    bake_config *config,
+    bool clean_missing)
 {
     ut_ll packages = ut_ll_new();
     ut_iter it;
     bake_project_type type;
 
-    uint32_t total = 0, package_count = 0, app_count = 0, error_count = 0;
+    uint32_t total = 0, package_count = 0, app_count = 0, template_count = 0, 
+             error_count = 0;
 
     /* Collect packages from BAKE_HOME */
     char *home_meta = ut_asprintf("%s/meta", config->home);
@@ -700,6 +731,8 @@ int bake_list(
         ut_trace("no bake target environment detected");
     }
 
+    ut_log("\n#[grey]Packages & Applications:#[normal]\n");
+
     /* Copy packages to array so they can be sorted with qsort */
     env_package *buffer = malloc(sizeof(env_package) * ut_ll_count(packages));
     uint32_t i = 0;
@@ -722,8 +755,9 @@ int bake_list(
             }
         }
 
-        if (!bake_locate(
-            config, package->id, bake_print_env(config, package), true, &type))
+        if (!bake_info(
+            config, package->id, bake_print_env(config, package), true, &type,
+            clean_missing))
         {
             if (type == BAKE_APPLICATION) {
                 app_count ++;
@@ -737,12 +771,57 @@ int bake_list(
         free(buffer[i].id);
     }
 
-    printf("\n");
-    if (error_count) {
-        ut_log("#[normal]applications: %d, packages: %d, #[red]errors:#[normal] %d\n",
-            app_count, package_count, error_count);
+    /* List templates */
+    char *template_path = ut_asprintf("%s/templates", config->home);
+    if (!ut_dir_iter(template_path, "/*", &it)) {
+        while (ut_iter_hasNext(&it)) {
+            char *id = ut_iter_next(&it);
+
+            if (!template_count) {
+                ut_log("\n#[grey]Templates:#[normal]\n");
+            }
+
+            ut_strbuf buf = UT_STRBUF_INIT;
+            ut_strbuf_appendstr(&buf, "[");
+
+            uint32_t lang_count = 0;
+            char *path = ut_asprintf("%s/templates/%s", config->home, id);
+            ut_iter lang_it;
+            ut_try(ut_dir_iter(path, NULL, &lang_it), NULL);
+            while (ut_iter_hasNext(&lang_it)) {
+                char *lang = ut_iter_next(&lang_it);
+                if (lang_count) {
+                    ut_strbuf_appendstr(&buf, ", ");
+                }
+                ut_strbuf_append(&buf, "#[green]%s#[normal]", lang);
+                lang_count ++;
+            }
+
+            ut_strbuf_appendstr(&buf, "]");
+
+            if (!lang_count) {
+                ut_log("T  %s #[red]!no languages!\n", id);
+                ut_strbuf_reset(&buf);
+            } else {
+                char *languages = ut_strbuf_get(&buf);
+                ut_log("T  %s #[grey]=> #[normal]%s\n", id, languages);
+                free(languages);
+            }
+
+            template_count ++;
+        }
     } else {
-        ut_log("#[normal]applications: %d, packages: %d\n", app_count, package_count);
+        ut_catch();
+    }
+    free(template_path);
+
+    ut_log("\n#[grey]Summary:#[normal]\n");
+    if (error_count) {
+        ut_info("#[reset]applications: %d, packages: %d, templates: %d, #[red]errors:#[reset] %d",
+            app_count, package_count, template_count, error_count);
+    } else {
+        ut_info("#[reset]applications: %d, packages: %d, templates: %d", 
+            app_count, package_count, template_count);
     }
     printf("\n");
 
@@ -851,19 +930,22 @@ int main(int argc, const char *argv[]) {
             action = "build";
         } else {
             ut_try( bake_discovery(&config), "discovery failed");
+            count = bake_crawler_count();
         }
 
         ut_log_pop();
 
         /* If projects have been discovered, build them */
-        if (build) {
-            ut_log_push("build");
-            ut_try(bake_build(&config, action), NULL);
-            ut_log_pop();
-        } else {
-            if (!strcmp(action, "foreach")) {
-                ut_try( bake_crawler_walk(
-                    &config, action, bake_foreach_action), NULL);
+        if (count) {
+            if (build) {
+                ut_log_push("build");
+                ut_try(bake_build(&config, action), NULL);
+                ut_log_pop();
+            } else {
+                if (!strcmp(action, "foreach")) {
+                    ut_try( bake_crawler_walk(
+                        &config, action, bake_foreach_action), NULL);
+                }
             }
         }
     } else {
@@ -872,7 +954,7 @@ int main(int argc, const char *argv[]) {
             ut_try( bake_env(&config), NULL);
         } else if (!strcmp(action, "setup")) {
             ut_try (bake_setup(argv[0], local_setup), NULL);
-        } else if (!strcmp(action, "init")) {
+        } else if (!strcmp(action, "new")) {
             ut_try (bake_init_project(&config), NULL);
         } else if (!strcmp(action, "run")) {
             ut_try (
@@ -880,11 +962,15 @@ int main(int argc, const char *argv[]) {
         } else if (!strcmp(action, "publish")) {
             ut_try (bake_publish_project(&config), NULL);
         } else if (!strcmp(action, "uninstall")) {
-            ut_try (bake_install_uninstall(&config, id), NULL);
-        } else if (!strcmp(action, "locate")) {
-            bake_locate(&config, path, NULL, true, NULL);
+            if (!clean_missing) {
+                ut_try (bake_install_uninstall(&config, id), NULL);
+            } else {
+                ut_try (bake_list(&config, true), NULL);
+            }
+        } else if (!strcmp(action, "info")) {
+            bake_info(&config, path, NULL, true, NULL, false);
         } else if (!strcmp(action, "list")) {
-            bake_list(&config);
+            bake_list(&config, false);
         } else if (!strcmp(action, "export")) {
             ut_try (bake_config_export(&config, export_expr), NULL);
         } else if (!strcmp(action, "unset")) {

@@ -186,6 +186,11 @@ int16_t bake_install_uninstall(
     bake_config *config,
     const char *project_id)
 {
+    if (!project_id) {
+        ut_throw("no project id specified for uninstaller");
+        goto error;
+    }
+
     const char *project_dir = ut_locate(project_id, NULL, UT_LOCATE_PROJECT);
     if (!project_dir) {
         ut_throw("project '%s' not found", project_id);
@@ -348,6 +353,27 @@ int16_t bake_install_prebuild(
         }
         free(install_path);
     }
+
+    return 0;
+error:
+    return -1;
+}
+
+int16_t bake_install_template(
+    bake_config *cfg,
+    bake_project *project)
+{
+    char *template_root = ut_asprintf("%s/templates", cfg->home);
+    ut_try( ut_mkdir(template_root), NULL);
+
+    char *template_path = ut_asprintf("%s/%s/%s", 
+        template_root, project->id, project->language);
+
+    ut_try( ut_rm(template_path), NULL);
+    ut_try( ut_symlink(project->path, template_path), NULL);
+
+    free(template_path);
+    free(template_root);
 
     return 0;
 error:
