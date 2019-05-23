@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 Sander Mertens
+/* Copyright (c) 2010-2019 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -153,7 +153,7 @@ int16_t bake_project_parse(
     bake_config *config,
     bake_project *project)
 {
-    char *file = ut_asprintf("%s/project.json", project->path);
+    char *file = ut_asprintf("%s"UT_OS_PS"project.json", project->path);
 
     if (ut_file_test(file) == 1) {
         JSON_Value *j = json_parse_file_with_comments(file);
@@ -358,7 +358,7 @@ int16_t bake_project_add_dependee_config(
     const char *libpath = ut_locate(dependency, NULL, UT_LOCATE_PROJECT);
     if (libpath) {
         /* Check if dependency has a dependee file with build instructions */
-        char *file = ut_asprintf("%s/dependee.json", libpath);
+        char *file = ut_asprintf("%s"UT_OS_PS"dependee.json", libpath);
         if (ut_file_test(file)) {
             ut_try (
               bake_project_load_dependee_config(config, project, dependency, file),
@@ -434,11 +434,11 @@ void bake_project_init_artefact(
 {
     if (project->artefact) {
         project->artefact_path = ut_asprintf(
-            "%s/bin/%s-%s", project->path, UT_PLATFORM_STRING,
+            "%s"UT_OS_PS"bin"UT_OS_PS"%s-%s", project->path, UT_PLATFORM_STRING,
             config->configuration);
 
         project->artefact_file = ut_asprintf(
-            "%s/%s", project->artefact_path, project->artefact);
+            "%s"UT_OS_PS"%s", project->artefact_path, project->artefact);
     }
 }
 
@@ -458,6 +458,10 @@ int16_t bake_project_init(
 
     project->id_underscore = ut_strdup(project->id);
     project->id_dash = ut_strdup(project->id);
+
+    if (ut_project_is_buildtool(project->id)) {
+        project->bake_extension = true;
+    }
 
     char *ptr;
     char ch;
@@ -480,11 +484,11 @@ int16_t bake_project_init(
         }
     }
 
-    project->id_short = strrchr(project->id, '.');
-    if (!project->id_short) {
-        project->id_short = project->id;
+    project->id_base = strrchr(project->id, '.');
+    if (!project->id_base) {
+        project->id_base = project->id;
     } else {
-        project->id_short ++;
+        project->id_base ++;
     }
 
     if (!project->sources) {
@@ -528,15 +532,15 @@ int16_t bake_project_init(
     }
 
     project->bin_path = ut_asprintf(
-        "%s/bin", project->path);
+        "%s"UT_OS_PS"bin", project->path);
 
     project->cache_path = ut_asprintf(
-        "%s/.bake_cache", project->path);
+        "%s"UT_OS_PS".bake_cache", project->path);
 
-    if (project->path[0] == '/') {
+    if (!ut_path_is_relative(project->path)) {
         project->fullpath = ut_strdup(project->path);
     } else if (strcmp(project->path, ".")) {
-        project->fullpath = ut_asprintf("%s/%s", ut_cwd(), project->path);
+        project->fullpath = ut_asprintf("%s"UT_OS_PS"%s", ut_cwd(), project->path);
     } else {
         project->fullpath = ut_strdup(ut_cwd());
     }
@@ -560,6 +564,13 @@ int bake_project_load_drivers(
         if (!strcmp(member, "id") || !strcmp(member, "type") ||
             !strcmp(member, "value"))
             continue;
+
+        if (strchr(member, '$')) {
+            ut_throw(
+                "cannot use template functions at root of project.json ('%s')",
+                member);
+            goto error;
+        }
 
         JSON_Value *value = json_object_get_value_at(project->json, i);
         JSON_Object *obj = json_value_get_object(value);
@@ -593,7 +604,7 @@ bake_project* bake_project_new(
     if (path) {
         ut_try (
             bake_project_parse(config, result),
-            "failed to parse '%s/project.json'",
+            "failed to parse '%s"UT_OS_PS"project.json'",
             path);
 
         ut_try( bake_project_init(config, result), NULL);
@@ -636,11 +647,21 @@ bake_attr* bake_project_get_attr(
     const char *attr)
 {
     bake_project_driver* driver = bake_project_get_driver(project, driver_id);
+
     if (driver && driver->attributes) {
         return bake_attr_get(driver->attributes, attr);
     } else {
         return NULL;
     }
+}
+
+/* Get JSON object of driver configuration */
+JSON_Object* bake_project_get_json(
+    bake_project *project,
+    const char *driver_id)
+{
+    bake_project_driver* driver = bake_project_get_driver(project, driver_id);
+    return driver->json;
 }
 
 /* Set attribute for project-specific driver configuration */
@@ -683,6 +704,13 @@ bake_attr* bake_project_set_attr_array(
         attr->name = ut_strdup(name);
         attr->kind = BAKE_ARRAY;
         attr->is.array = ut_ll_new();
+
+        bake_project_driver* driver = bake_project_get_driver(project, driver_id);
+        if (!driver->attributes) {
+            driver->attributes = ut_ll_new();
+        }
+
+        ut_ll_append(driver->attributes, attr);
     }
 
     if (attr->kind != BAKE_ARRAY) {
@@ -699,7 +727,10 @@ bake_attr* bake_project_set_attr_array(
         }
     }
 
-    ut_ll_append(attr->is.array, ut_strdup(value));
+    bake_attr *attr_el = ut_calloc(sizeof(bake_attr));
+    attr_el->kind = BAKE_STRING;
+    attr_el->is.string = ut_strdup(value);
+    ut_ll_append(attr->is.array, attr_el);
 
     return attr;
 }
@@ -743,7 +774,7 @@ int bake_project_parse_driver_config(
         }
 
         driver->attributes = bake_attrs_parse(
-            config, project, project->id, driver->json, NULL);
+            config, project, project->id, driver->json, driver->attributes);
         if (!driver->attributes) {
             goto error;
         }
@@ -933,15 +964,8 @@ int16_t bake_project_generate(
     bake_config *config,
     bake_project *project)
 {
-    /* Invoke generate action for all drivers */
-    ut_iter it = ut_ll_iter(project->drivers);
-    while (ut_iter_hasNext(&it)) {
-        bake_project_driver *driver = ut_iter_next(&it);
-        ut_try( bake_driver__generate(driver->driver, config, project), NULL);
-    }
-
     /* Evaluate GENERATED-SOURCES nodes if there are any */
-    it = ut_ll_iter(project->drivers);
+    ut_iter it = ut_ll_iter(project->drivers);
     while (ut_iter_hasNext(&it)) {
         bake_project_driver *driver = ut_iter_next(&it);
         bake_node *node = bake_node_find(driver->driver, "GENERATED-SOURCES");
@@ -961,6 +985,13 @@ int16_t bake_project_generate(
 
         ut_tls_set(BAKE_DRIVER_KEY, old_driver);
         ut_tls_set(BAKE_PROJECT_KEY, old_project);
+    }
+
+    /* Invoke generate action for all drivers */
+    it = ut_ll_iter(project->drivers);
+    while (ut_iter_hasNext(&it)) {
+        bake_project_driver *driver = ut_iter_next(&it);
+        ut_try( bake_driver__generate(driver->driver, config, project), NULL);
     }
 
     return 0;
@@ -1028,19 +1059,21 @@ ut_ll bake_project_copy_libs(
     while (ut_iter_hasNext(&it)) {
         char *link = ut_iter_next(&it);
 
-        char *link_lib = strrchr(link, '/');
+        char *link_lib = strrchr(link, UT_OS_PS[0]);
         if (!link_lib) {
             link_lib = link;
         } else {
             link_lib ++;
         }
 
+#ifndef _WIN32
         if (!strncmp(link_lib, "lib", 3)) {
             link_lib += 3;
         }
+#endif
 
-        char *target_link = ut_asprintf("%s/lib%s_%s",
-            path, p->id_underscore, link_lib);
+        char *target_link = ut_asprintf("%s"UT_OS_PS"%s%s_%s",
+            path, UT_LIB_PREFIX, p->id_underscore, link_lib);
 
         /* Copy to path */
         if (ut_cp(link, target_link)) {
@@ -1092,7 +1125,7 @@ int16_t bake_project_add_dependency(
         char *dep_lib = ut_strdup(dep);
         char *ptr, ch;
         for (ptr = dep_lib; (ch = *ptr); ptr ++) {
-            if (ch == '/' || ch == '.') {
+            if (ch == UT_OS_PS[0] || ch == '.') {
                 ptr[0] = '_';
             }
         }
@@ -1217,9 +1250,9 @@ int16_t bake_project_build(
         goto error;
     }
 
-    /* Copy libraries to BAKE_TARGET, return list with local library names */
+    /* Copy libraries to libpath, return list with local library names */
     ut_ll old_link = project->link;
-    project->link = bake_project_copy_libs(project, config->target_lib);
+    project->link = bake_project_copy_libs(project, UT_LIB_PATH);
     if (!project->link) {
         ut_throw(NULL);
         goto error;
@@ -1228,6 +1261,13 @@ int16_t bake_project_build(
     /* Add use dependencies to the link attribute */
     if (bake_project_add_dependencies(project)) {
         goto error;
+    }
+
+    /* Run driver actions for build stage */
+    ut_iter it = ut_ll_iter(project->drivers);
+    while (ut_iter_hasNext(&it)) {
+        bake_project_driver *driver = ut_iter_next(&it);
+        ut_try( bake_driver__build(driver->driver, config, project), NULL);
     }
 
     /* Run the top-level ARTEFACT rule */
@@ -1323,7 +1363,7 @@ int16_t bake_project_clean_intern(
         ut_iter it = ut_ll_iter(project->files_to_clean);
         while (ut_iter_hasNext(&it)) {
             char *file = ut_iter_next(&it);
-            ut_try(ut_rm(strarg("%s/%s", project->path, file)), NULL);
+            ut_try(ut_rm(strarg("%s"UT_OS_PS"%s", project->path, file)), NULL);
         }
     }
 
@@ -1461,39 +1501,93 @@ const char* bake_project_type_str(
 /* Create project.json file for new project */
 static
 int16_t bake_project_create_project_json(
-    bake_project *project)
+    bake_project *project,
+    bool is_test)
 {
-    char *description = bake_random_description();
+    char *author = project->author;
+    if (!author) {
+        if (rand() % 2 == 1) {
+            author = "John Doe";
+        } else {
+            author = "Jane Doe";
+        }
+    }
+    
+    char *description = project->description;
+    if (!description) {
+        description = bake_random_description();
+    }
 
     /* Create project.json */
-    FILE *f = fopen("project.json", "w");
+    ut_code *f = ut_code_open("project.json");
     if (!f) {
         ut_throw("failed to open 'project.json");
         goto error;
     }
 
-    fprintf(f,
-        "{\n"
-        "    \"id\": \"%s\",\n"
-        "    \"type\": \"%s\",\n"
-        "    \"value\": {\n"
-        "        \"author\": \"John Doe\",\n"
-        "        \"description\": \"%s\",\n"
-        "        \"version\": \"0.0.0\",\n"
-        "        \"repository\": null,\n"
-        "        \"license\": null",
-            project->id,
-            bake_project_type_str(project->type),
-            description);
+    ut_code_write(f, "{\n");
+    ut_code_indent(f);
+    ut_code_write(f, "\"id\": \"%s\",\n", project->id);
+    ut_code_write(f, "\"type\": \"%s\",\n", bake_project_type_str(project->type));
+    ut_code_write(f, "\"value\": {\n");
+    ut_code_indent(f);
+    ut_code_write(f, "\"author\": \"%s\",\n", author);
+    ut_code_write(f, "\"description\": \"%s\"", description);
 
     if (strcmp(project->language, "c")) {
-        fprintf(f,
-        ",\n        \"language\": \"%s\"", project->language);
+        ut_code_write(f, ",\n");
+        ut_code_write(f, "\"language\": \"%s\"", project->language);
     }
 
-    fprintf(f, "\n    }\n}\n");
+    if (!project->public) {
+        ut_code_write(f, ",\n");
+        ut_code_write(f, "\"public\": false");
+    }
 
-    fclose(f);
+    if (project->use && ut_ll_count(project->use)) {
+        int count = 0;
+
+        ut_code_write(f, ",\n");
+        ut_code_write(f, "\"use\": [");
+        ut_code_indent(f);
+        
+        ut_iter it = ut_ll_iter(project->use);
+        while (ut_iter_hasNext(&it)) {
+            const char *pkg = ut_iter_next(&it);
+            if (count) ut_code_write(f, ",");
+            ut_code_write(f, "\n");
+            ut_code_write(f, "\"%s\"", pkg);
+            count ++;
+        }
+
+        ut_code_dedent(f);
+        ut_code_write(f, "\n");
+        ut_code_write(f, "]");
+    }
+
+    ut_code_write(f, "\n");
+    ut_code_dedent(f);
+    ut_code_write(f, "}");
+
+    if (is_test) {
+        ut_code_write(f, ",\n");
+        ut_code_write(f, "\"test\": {\n");
+        ut_code_indent(f);
+        ut_code_write(f, "\"testsuites\": [{\n");
+        ut_code_indent(f);
+        ut_code_write(f, "\"id\": \"my_suite\",\n");
+        ut_code_write(f, "\"testcases\": []\n");
+        ut_code_dedent(f);
+        ut_code_write(f, "}]\n");
+        ut_code_dedent(f);
+        ut_code_write(f, "}");
+    }
+
+    ut_code_write(f, "\n");
+    ut_code_dedent(f);
+    ut_code_write(f, "}\n");
+
+    ut_code_close(f);
 
     return 0;
 error:
@@ -1511,10 +1605,10 @@ int16_t bake_project_create_gitignore(
         goto error;
     }
 
-    fprintf(f, ".bake_cache");
-    fprintf(f, ".DS_Store");
-    fprintf(f, ".vscode");
-    fprintf(f, "bin");
+    fprintf(f, ".bake_cache\n");
+    fprintf(f, ".DS_Store\n");
+    fprintf(f, ".vscode\n");
+    fprintf(f, "bin\n");
 
     fclose(f);
 
@@ -1526,7 +1620,8 @@ error:
 /* Setup a new project */
 int16_t bake_project_setup(
     bake_config *config,
-    bake_project *project)
+    bake_project *project,
+    bool is_test)
 {
     bake_driver *driver = project->language_driver->driver;
 
@@ -1534,7 +1629,7 @@ int16_t bake_project_setup(
         ut_proc_runRedirect("git", (const char*[]){"git", "init", NULL}, stdin, stdout, stderr),
         "failed to initialize git repository");
 
-    ut_try( bake_project_create_project_json(project), NULL);
+    ut_try( bake_project_create_project_json(project, is_test), NULL);
 
     ut_try( bake_project_create_gitignore(project), NULL);
 
@@ -1551,7 +1646,10 @@ int16_t bake_project_setup(
         project->language, 
         project->type == BAKE_APPLICATION
             ? "application"
-            : "package",
+            : project->type == BAKE_TEMPLATE 
+                ? "template"
+                : "package"
+            ,
         project->id);
 
     return 0;
@@ -1699,12 +1797,14 @@ int16_t bake_project_setup_w_template(
         goto error;
     }
 
-    template_path = ut_asprintf("%s/%s", template_root, project->language);
+    template_path = ut_asprintf("%s"UT_OS_PS"%s", template_root, project->language);
     if (ut_file_test(template_path) != 1) {
         ut_throw("template '%s' not available for language '%s'",
             template_id, project->language);
         goto error;
     }
+
+    ut_debug("start iterating over template path '%s'", template_path);
 
     ut_iter it;
     ut_try( ut_dir_iter(template_path, "//", &it), NULL);
@@ -1712,6 +1812,7 @@ int16_t bake_project_setup_w_template(
     while (ut_iter_hasNext(&it)) {
         char *file = ut_iter_next(&it);
         if (file[0] == '.') {
+            ut_debug("ignoring hidden file '%s'", file);
             continue;
         }
 
@@ -1720,25 +1821,30 @@ int16_t bake_project_setup_w_template(
         }
 
         bool is_template = bake_is_template_file(file);
-        char *src_path = ut_asprintf("%s/%s", template_path, file);
-
+        char *src_path = ut_asprintf("%s"UT_OS_PS"%s", template_path, file);
         char *real = file;
         
         if (is_template) {
             real = bake_project_template_filename(config, project, file);
         }
 
-        char *dst_path = ut_asprintf("%s/%s", project->path, real);
+        char *dst_path = ut_asprintf("%s"UT_OS_PS"%s", project->path, real);
+
+        ut_debug("copy '%s' to '%s' (project path = '%s', old filename = '%s', template = %d)", 
+            src_path, dst_path, project->path, file, is_template);
 
         if (!ut_isdir(src_path)) {
             if (is_template) {
+                ut_debug("copy template file '%s' to '%s'", src_path, dst_path);
                 ut_try( bake_project_file_from_template(
                     config, project, src_path, dst_path),
                     NULL);
             } else {
+                ut_debug("copy regular file '%s' to '%s'", src_path, dst_path);
                 ut_try( ut_cp(src_path, dst_path), NULL);
             }
         } else {
+            ut_debug("create directory '%s'", dst_path);
             ut_try( ut_mkdir(dst_path), NULL);
         }
 
@@ -1747,7 +1853,7 @@ int16_t bake_project_setup_w_template(
     }
 
     /* Load JSON from template, tailor to project */
-    char *template_json = ut_asprintf("%s/project.json", template_path);
+    char *template_json = ut_asprintf("%s"UT_OS_PS"project.json", template_path);
     JSON_Value *value = json_parse_file_with_comments(template_json);
     if (!value) {
         ut_throw("failed to load project.json of template '%s", template_id);
@@ -1766,7 +1872,7 @@ int16_t bake_project_setup_w_template(
     json_object_set_string(root, "type", bake_project_type_str(project->type));
 
     /* Write to project.json of project */
-    char *project_json = ut_asprintf("%s/project.json", project->path);
+    char *project_json = ut_asprintf("%s"UT_OS_PS"project.json", project->path);
     json_serialize_to_file_pretty(value, project_json);
     free(project_json);
 

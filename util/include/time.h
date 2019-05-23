@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 Sander Mertens
+/* Copyright (c) 2010-2019 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -81,6 +81,15 @@ UT_EXPORT
 int timespec_compare(
     struct timespec t1,
     struct timespec t2);
+
+/** Measure time passed since last measurement.
+ *
+ * @param t1 Last measurement
+ * @result Time elapsed since last measurement
+ */
+UT_EXPORT
+double timespec_measure(
+    struct timespec *t1);
 
 /** Convert time to double-precision floating point value.
  *

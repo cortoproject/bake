@@ -14,26 +14,35 @@
  * dependencies will automatically show up in this file. Include bake_config.h
  * in your main project file. Do not edit! */
 
-#ifndef PKG_DEPENDENCY_BAKE_CONFIG_H
-#define PKG_DEPENDENCY_BAKE_CONFIG_H
+#ifndef EXAMPLES_C_PKG_DEPENDENCY_BAKE_CONFIG_H
+#define EXAMPLES_C_PKG_DEPENDENCY_BAKE_CONFIG_H
 
+/* Generated includes are specific to the bake environment. If a project is not
+ * built with bake, it will have to provide alternative methods for including
+ * its dependencies. */
+#ifdef __BAKE__
 /* Headers of public dependencies */
-#include <pkg_helloworld>
+#include <examples.c.pkg_helloworld>
 
 /* Headers of private dependencies */
-#ifdef PKG_DEPENDENCY_IMPL
+#ifdef EXAMPLES_C_PKG_DEPENDENCY_IMPL
 /* No dependencies */
+#endif
 #endif
 
 /* Convenience macro for exporting symbols */
-#if PKG_DEPENDENCY_IMPL && defined _MSC_VER
-#define PKG_DEPENDENCY_EXPORT __declspec(dllexport)
-#elif PKG_DEPENDENCY_IMPL
-#define PKG_DEPENDENCY_EXPORT __attribute__((__visibility__("default")))
-#elif defined _MSC_VER
-#define PKG_DEPENDENCY_EXPORT __declspec(dllimport)
+#ifndef EXAMPLES_C_PKG_DEPENDENCY_STATIC
+  #if EXAMPLES_C_PKG_DEPENDENCY_IMPL && defined _MSC_VER
+    #define EXAMPLES_C_PKG_DEPENDENCY_EXPORT __declspec(dllexport)
+  #elif EXAMPLES_C_PKG_DEPENDENCY_IMPL
+    #define EXAMPLES_C_PKG_DEPENDENCY_EXPORT __attribute__((__visibility__("default")))
+  #elif defined _MSC_VER
+    #define EXAMPLES_C_PKG_DEPENDENCY_EXPORT __declspec(dllimport)
+  #else
+    #define EXAMPLES_C_PKG_DEPENDENCY_EXPORT
+  #endif
 #else
-#define PKG_DEPENDENCY_EXPORT
+  #define EXAMPLES_C_PKG_DEPENDENCY_EXPORT
 #endif
 
 #endif

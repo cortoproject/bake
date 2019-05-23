@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 the corto developers
+/* Copyright (c) 2010-2019 the corto developers
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -79,7 +79,8 @@ struct bake_project {
     char *cache_path;       /* Project path containing temporary build files */
     char *id_underscore;    /* Id with underscores instead of dots */
     char *id_dash;          /* Id with dashes instead of dots */
-    char *id_short;         /* Last element of id */
+    char *id_base;          /* Last element of id */
+    bool bake_extension;    /* Is package a bake extension (install to HOME) */
 
     /* Direct access to the parson JSON data */
     void *json;

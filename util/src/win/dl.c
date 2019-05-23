@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 Sander Mertens
+/* Copyright (c) 2010-2019 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -19,41 +19,35 @@
  * THE SOFTWARE.
  */
 
-#ifndef UT_THREAD_POSIX_H_
-#define UT_THREAD_POSIX_H_
+#include "../../include/util.h"
 
+typedef void*(*dlproc)(void);
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-typedef pthread_key_t ut_tls;
-
-typedef struct ut_mutex_s {
-    pthread_mutex_t mutex;
-} ut_mutex_s;
-
-typedef struct ut_rwmutex_s {
-    pthread_rwlock_t mutex;
-} ut_rwmutex_s;
-
-typedef struct ut_cond_s {
-    pthread_cond_t cond;
-} ut_cond_s;
-
-typedef struct ut_sem_s {
-    pthread_mutex_t mutex;
-    pthread_cond_t cond;
-    int value;
-} ut_sem_s;
-
-#define UT_MUTEX_INIT {PTHREAD_MUTEX_INITIALIZER}
-#define UT_RWMUTEX_INIT {PTHREAD_RWLOCK_INITIALIZER}
-#define UT_COND_INIT {PTHREAD_COND_INITIALIZER}
-#define UT_SEM_INIT {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER}
-
-#ifdef __cplusplus
+/* Link dynamic library */
+ut_dl ut_dl_open(const char* file) {
+    ut_dl dl;
+    dl = LoadLibraryA(file);
+    return dl;
 }
-#endif
 
-#endif /* UT_THREAD_POSIX_H_ */
+/* Close dynamic library */
+void ut_dl_close(ut_dl dl) {
+    FreeLibrary(dl);
+}
+
+/* Lookup symbol in dynamic library */
+void* ut_dl_sym(ut_dl dl, const char* sym) {
+    FARPROC a = GetProcAddress(dl, sym);
+    return (void *)a;
+}
+
+/* Lookup procedure in dynamic library */
+void*(*ut_dl_proc(ut_dl dl, const char* proc))(void) {
+    FARPROC a = GetProcAddress(dl, proc);
+    return (void*)a;
+}
+
+/* Lookup last error */
+const char* ut_dl_error(void) {
+    return ut_last_win_error();
+}

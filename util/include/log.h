@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 Sander Mertens
+/* Copyright (c) 2010-2019 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -57,6 +57,15 @@
 extern "C" {
 #endif
 
+#ifdef _WIN32
+#include <dbghelp.h>
+#define TRACE_MAX_STACK_FRAMES 1024
+#define TRACE_MAX_FUNCTION_NAME_LENGTH 1024
+#endif
+
+#ifdef _WIN32
+    void ut_enable_console_color();
+#endif
 
 /* -- Setting & getting verbosity level -- */
 
@@ -134,7 +143,6 @@ bool ut_log_profile(
  * The following characters can be used for specifying the format:
  * -v Verbosity
  * -a Application name
- * -A Process id
  * -c Category
  * -C Category (tree view)
  * -m Formatted message
@@ -188,46 +196,27 @@ void ut_log_embedCategories(
 
 /* -- Registering handlers for logging -- */
 
-typedef void* ut_log_handler;
 typedef void (*ut_log_handler_cb)(
     ut_log_verbosity level,
-    char *category[],
-    char *msg,
+    const char *msg,
     void *ctx);
 
 /** Register callback that catches log messages.
- * The parameters of this function specify filters for incoming messages.
- * @param min_level Minimum verbosity level. Set to DEBUG for all messages.
- * @param max_level Maximum verbosity level. Set to CRITICAL for all messages.
- * @param category_filter Filter on category using idmatch format. Set to "//" for all messages.
- * @param auth_token Specify authorization token when security is enabled.
  * @param callback Message handler callback.
  * @param context Generic value that will be passed to handler.
  * @return Handler object that can be used to unregister callback.
  */
 UT_EXPORT
-ut_log_handler ut_log_handlerRegister(
-    ut_log_verbosity min_level,
-    ut_log_verbosity max_level,
-    char* category_filter,
-    char* auth_token,
+void ut_log_handlerRegister(
     ut_log_handler_cb callback,
     void *context);
-
-/** Unregister a handler.
- *
- * @param handler The handler object.
- */
-UT_EXPORT
-void ut_log_handlerUnregister(
-    ut_log_handler handler);
 
 /** Check if any handlers are registered.
  *
  * @return true if handlers are registered, otherwise false.
  */
 UT_EXPORT
-bool ut_log_handlersRegistered(void);
+bool ut_log_handlerRegistered(void);
 
 
 
@@ -580,7 +569,7 @@ void ut_log_deinit();
 #define ut_critical_fl(file, line, ...) _ut_critical(file, line, UT_FUNCTION, __VA_ARGS__)
 
 #define _SHOULD_PRINT(lvl)\
-    ut_log_handlersRegistered() ||\
+    ut_log_handlerRegistered() ||\
     ut_log_verbosityGet() <= lvl
 
 #define ut_throw(...) _ut_throw(__FILE__, __LINE__, UT_FUNCTION, __VA_ARGS__)

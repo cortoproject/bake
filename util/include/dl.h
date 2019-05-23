@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 Sander Mertens
+/* Copyright (c) 2010-2019 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -31,7 +31,11 @@
 extern "C" {
 #endif
 
+#ifndef _WIN32
 typedef struct ut_dl_s* ut_dl;
+#else
+typedef HMODULE ut_dl;
+#endif 
 
 /** Load dynamic library.
  *

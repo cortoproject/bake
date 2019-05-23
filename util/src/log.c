@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 Sander Mertens
+/* Copyright (c) 2010-2019 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -24,6 +24,22 @@
 #define UT_LOG_FILE_LEN (20)
 #define UT_MAX_LOG (1024)
 
+#ifdef _WIN32
+void ut_enable_console_color(int io_handle)
+{
+    HANDLE hOut = GetStdHandle(io_handle);
+    if (hOut == INVALID_HANDLE_VALUE)
+        return;
+
+    DWORD dwMode = 0;
+    if (!GetConsoleMode(hOut, &dwMode))
+        return;
+
+    dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+    SetConsoleMode(hOut, dwMode);
+}
+#endif
+
 ut_log_verbosity ut_logv(
     char const *file,
     unsigned int line,
@@ -43,8 +59,12 @@ char *ut_log_appName = "";
 extern ut_mutex_s ut_log_lock;
 static ut_tls UT_KEY_LOG = 0;
 
-/* List of log handlers (protected by lock) */
-static ut_ll ut_log_handlers;
+typedef struct ut_log_handler {
+    void *ctx;
+    ut_log_handler_cb cb;
+} ut_log_handler;
+
+static ut_log_handler log_handler;
 
 /* These global variables are shared across threads and are *not* protected by
  * a mutex. Libraries should not invoke functions that touch these, and an
@@ -112,15 +132,6 @@ typedef struct ut_log_tlsData {
     void *stack_marker;
 } ut_log_tlsData;
 
-struct ut_log_handler {
-    ut_log_verbosity min_level, max_level;
-    char *category_filter;
-    ut_expr_program compiled_category_filter;
-    char *auth_token;
-    void *ctx;
-    ut_log_handler_cb cb;
-};
-
 static
 ut_log_tlsData* ut_getThreadData(void){
     ut_log_tlsData* result;
@@ -139,109 +150,24 @@ ut_log_tlsData* ut_getThreadData(void){
     return result;
 }
 
-ut_log_handler ut_log_handlerRegister(
-    ut_log_verbosity min_level,
-    ut_log_verbosity max_level,
-    char* category_filter,
-    char* auth_token,
+void ut_log_handlerRegister(
     ut_log_handler_cb callback,
     void *ctx)
 {
-    struct ut_log_handler* result = malloc(sizeof(struct ut_log_handler));
-
-    result->min_level = min_level;
-    result->max_level = max_level;
-    result->category_filter = category_filter ? ut_strdup(category_filter) : NULL;
-    result->auth_token = auth_token ? ut_strdup(auth_token) : NULL;
-    result->cb = callback;
-    result->ctx = ctx;
-
-    if (result->category_filter) {
-        result->compiled_category_filter =
-            ut_expr_compile(result->category_filter, TRUE, TRUE);
-        if (!result->compiled_category_filter) {
-            ut_throw("invalid filter");
-            goto error;
-        }
-    } else {
-        result->compiled_category_filter = NULL;
-    }
-
-    if (ut_mutex_lock(&ut_log_lock)) {
-        ut_throw(NULL);
-        goto error;
-    }
-    if (!ut_log_handlers) {
-        ut_log_handlers = ut_ll_new();
-    }
-    ut_ll_append(ut_log_handlers, result);
-    if (ut_mutex_unlock(&ut_log_lock)) {
-        ut_throw(NULL);
-        goto error;
-    }
-
-    return result;
-error:
-    if (result) free(result);
-    return NULL;
+    log_handler.cb = callback;
+    log_handler.ctx = ctx;
 }
 
-void ut_log_handlerUnregister(
-    ut_log_handler cb)
-{
-    struct ut_log_handler* callback = cb;
-    if (callback) {
-        if (ut_mutex_lock(&ut_log_lock)) {
-            ut_throw(NULL);
-            ut_raise();
-        }
-        ut_ll_remove(ut_log_handlers, callback);
-        if (!ut_ll_count(ut_log_handlers)) {
-            ut_ll_free(ut_log_handlers);
-            ut_log_handlers = NULL;
-        }
-        if (ut_mutex_unlock(&ut_log_lock)) {
-            ut_throw(NULL);
-            ut_raise();
-        }
-
-        if (callback->category_filter) free(callback->category_filter);
-        if (callback->auth_token) free(callback->auth_token);
-        if (callback->compiled_category_filter) ut_expr_free(callback->compiled_category_filter);
-        free(callback);
-    }
-}
-
-bool ut_log_handlersRegistered(void) {
-    return ut_log_handlers != NULL;
+bool ut_log_handlerRegistered(void) {
+    return log_handler.cb != NULL;
 }
 
 void ut_err_notifyCallkback(
-    ut_log_handler cb,
-    char *categories[],
     ut_log_verbosity level,
     char *msg)
 {
-    struct ut_log_handler* callback = cb;
-    bool filterMatch = TRUE;
-    if (level >= callback->min_level && level <= callback->max_level) {
-        if (callback->compiled_category_filter) {
-            ut_strbuf buff = UT_STRBUF_INIT;
-            int32_t i;
-            for (i = 0; categories[i]; i++) {
-                if (i) ut_strbuf_appendstr(&buff, "/");
-                ut_strbuf_appendstr(&buff, categories[i]);
-            }
-            char *str = ut_strbuf_get(&buff);
-            if (!ut_expr_run(callback->compiled_category_filter, str)) {
-                filterMatch = FALSE;
-            }
-            free(str);
-        }
-
-        if (filterMatch) {
-            callback->cb(level, categories, msg, callback->ctx);
-        }
+    if (log_handler.cb) {
+        log_handler.cb(level, msg, log_handler.ctx);
     }
 }
 
@@ -254,11 +180,12 @@ void ut_printBacktrace(FILE* f, int nEntries, char** symbols) {
 }
 
 void ut_backtrace(FILE* f) {
+#ifndef _WIN32
     int nEntries;
     void* buff[BACKTRACE_DEPTH];
     char** symbols;
 
-#ifdef ENABLE_BACKTRACE
+    #ifdef ENABLE_BACKTRACE
     nEntries = backtrace(buff, BACKTRACE_DEPTH);
     if (nEntries) {
         symbols = backtrace_symbols(buff, BACKTRACE_DEPTH);
@@ -269,8 +196,32 @@ void ut_backtrace(FILE* f) {
     } else {
         fprintf(f, "obtaining backtrace failed.");
     }
+    #endif
 #else
-    fprintf(f, "backtrace unavailable");
+    void *stack[TRACE_MAX_STACK_FRAMES];
+    HANDLE process = GetCurrentProcess();
+    SymInitialize(process, NULL, TRUE);
+    WORD numberOfFrames = CaptureStackBackTrace(0, TRACE_MAX_STACK_FRAMES, stack, NULL);
+    SYMBOL_INFO *symbol = (SYMBOL_INFO *)malloc(sizeof(SYMBOL_INFO) + (TRACE_MAX_FUNCTION_NAME_LENGTH - 1) * sizeof(TCHAR));
+    symbol->MaxNameLen = TRACE_MAX_FUNCTION_NAME_LENGTH;
+    symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+    DWORD displacement;
+    IMAGEHLP_LINE64 *line = (IMAGEHLP_LINE64 *)malloc(sizeof(IMAGEHLP_LINE64));
+    line->SizeOfStruct = sizeof(IMAGEHLP_LINE64);
+    for (int i = 0; i < numberOfFrames; i++)
+    {
+        DWORD64 address = (DWORD64)(stack[i]);
+        SymFromAddr(process, address, NULL, symbol);
+        if (SymGetLineFromAddr64(process, address, &displacement, line))
+        {
+            fprintf(f, "\tat %s in %s: line: %lu: address: 0x%I64X\n", symbol->Name, line->FileName, line->LineNumber, symbol->Address);
+        }
+        else
+        {
+            fprintf(f, "\tSymGetLineFromAddr64 returned error code %lu.\n", GetLastError());
+            fprintf(f, "\tat %s, address 0x%I64X.\n", symbol->Name, symbol->Address);
+        }
+    }
 #endif
 }
 
@@ -283,7 +234,8 @@ char* ut_backtraceString(void) {
     result = malloc(10000);
     *result = '\0';
 
-#ifdef ENABLE_BACKTRACE
+#ifndef _WIN32
+    #ifdef ENABLE_BACKTRACE
     nEntries = backtrace(buff, BACKTRACE_DEPTH);
     if (nEntries) {
         symbols = backtrace_symbols(buff, BACKTRACE_DEPTH);
@@ -298,8 +250,35 @@ char* ut_backtraceString(void) {
     } else {
         fprintf(stderr, "obtaining backtrace failed.");
     }
-#else
+    #else
     result = ut_strdup("backtrace unavailable");
+    #endif
+#else
+    void *stack[TRACE_MAX_STACK_FRAMES];
+    HANDLE process = GetCurrentProcess();
+    SymInitialize(process, NULL, TRUE);
+    WORD numberOfFrames = CaptureStackBackTrace(0, TRACE_MAX_STACK_FRAMES, stack, NULL);
+    SYMBOL_INFO *symbol = (SYMBOL_INFO *)malloc(sizeof(SYMBOL_INFO) + (TRACE_MAX_FUNCTION_NAME_LENGTH - 1) * sizeof(TCHAR));
+    symbol->MaxNameLen = TRACE_MAX_FUNCTION_NAME_LENGTH;
+    symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+    DWORD displacement;
+    IMAGEHLP_LINE64 *line = (IMAGEHLP_LINE64 *)malloc(sizeof(IMAGEHLP_LINE64));
+    line->SizeOfStruct = sizeof(IMAGEHLP_LINE64);
+    for (int i = 0; i < numberOfFrames; i++)
+    {
+        DWORD64 address = (DWORD64)(stack[i]);
+        SymFromAddr(process, address, NULL, symbol);
+        if (SymGetLineFromAddr64(process, address, &displacement, line))
+        {
+            sprintf(result, "%s \tat %s in %s: line: %lu: address: 0x%I64X\n", result, symbol->Name, line->FileName, line->LineNumber, symbol->Address);
+        }
+        else
+        {
+            sprintf(result, "%s \tSymGetLineFromAddr64 returned error code %lu.\n", result, GetLastError());
+            sprintf(result, "%s \tat %s, address 0x%I64X.\n", result, symbol->Name, symbol->Address);
+        }
+    }
+    strcat(result, "\n");
 #endif
 
     return result;
@@ -480,6 +459,16 @@ char* ut_log_colorize(
             }
         }
 
+        if (ch == '\n') {
+            if (isNum || isStr || isVar || overrideColor) {
+                if (UT_LOG_USE_COLORS) ut_strbuf_appendstr(&buff, UT_NORMAL);
+                overrideColor = false;
+                isNum = false;
+                isStr = false;
+                isVar = false;
+            }
+        }
+
         if (!dontAppend) {
             ut_strbuf_appendstrn(&buff, ptr, 1);
         }
@@ -555,7 +544,7 @@ void ut_logprint_friendlyTime(
     ut_strbuf *buf,
     struct timespec t)
 {
-    ut_id tbuff;
+    char tbuff[512];
     time_t sec = t.tv_sec;
     struct tm * timeinfo = localtime(&sec);
     strftime(tbuff, sizeof(tbuff), "%F %T", timeinfo);
@@ -647,7 +636,7 @@ char const* ut_log_stripFunctionName(
         char const *ptr;
         char ch;
         for (ptr = file; (ch = *ptr); ptr++) {
-            if (ch == '.' || ch == '/') {
+            if (ch == '.' || ch == UT_OS_PS[0]) {
                 file = ptr + 1;
             } else {
                 break;
@@ -718,24 +707,6 @@ int ut_logprint_function(
 }
 
 static
-int ut_logprint_proc(
-    ut_strbuf *buf)
-{
-    char *colors[] = {
-        "green",
-        "yellow",
-        "blue",
-        "magenta",
-        "cyan",
-        "white",
-        "grey",
-    };
-    ut_proc id = ut_proc();
-    ut_strbuf_append(buf, "#[%s]%u#[reset]", colors[id % 6], id);
-    return 1;
-}
-
-static
 void ut_log_resetCursor(
     ut_log_tlsData *data)
 {
@@ -802,7 +773,7 @@ void ut_logprint(
         now = data->frames[breakAtCategory - 1].lastTime;
     }
 
-    ut_log_clearLine(data);
+    //ut_log_clearLine(data);
 
     for (fmtptr = log_fmt; (ch = *fmtptr); fmtptr++) {
         ut_strbuf tmp = UT_STRBUF_INIT;
@@ -885,7 +856,6 @@ void ut_logprint(
             case 'r': ret = ut_logprint_function(cur, function); break;
             case 'm': ret = ut_logprint_msg(cur, msg); break;
             case 'a': ut_strbuf_append(cur, "#[cyan]%s#[reset]", ut_log_appName); break;
-            case 'A': ret = ut_logprint_proc(cur); break;
             case 'V': if (only_warn) { ut_logprint_kind(cur, kind, breakAtCategory || closeCategory); } else { ret = 0; } break;
             case 'F': if (only_warn) { ret = ut_logprint_file(cur, file, FALSE); } else { ret = 0; } break;
             case 'L': if (only_warn) { ret = ut_logprint_line(cur, line, FALSE); } else { ret = 0; } break;
@@ -944,13 +914,14 @@ void ut_logprint(
 
     if (str) {
         char *colorized = ut_log_colorize(str);
+
         if (breakAtCategory) {
             fprintf(f, "%s", colorized);
         } else {
             if (isTail) {
-                fprintf(f, "%s", colorized);
-                data->last_printed_len = printlen(colorized);
-                ut_log_resetCursor(data);
+                fprintf(f, "%s\n", colorized);
+                //data->last_printed_len = printlen(colorized);
+                //ut_log_resetCursor(data);
             } else {
                 if (msg) {
                     fprintf(f, "%s\n", colorized);
@@ -1286,7 +1257,7 @@ ut_log_verbosity ut_logv(
 
     if (kind >= UT_LOG_LEVEL ||
         (overwrite && (UT_LOG_LEVEL - kind == 1)) ||
-        ut_log_handlers)
+        ut_log_handlerRegistered())
     {
         char* alloc = NULL;
         char buff[UT_MAX_LOG + 1];
@@ -1331,27 +1302,8 @@ ut_log_verbosity ut_logv(
             }
         }
 
-        if (ut_log_handlers) {
-            if (ut_mutex_lock(&ut_log_lock)) {
-                ut_throw(NULL);
-                ut_raise();
-            }
-            if (ut_log_handlers) {
-                ut_iter it = ut_ll_iter(ut_log_handlers);
-                while (ut_iter_hasNext(&it)) {
-                    ut_log_handler callback = ut_iter_next(&it);
-                    ut_err_notifyCallkback(
-                        callback,
-                        categories,
-                        kind,
-                        msgBody);
-                }
-            }
-            if (ut_mutex_unlock(&ut_log_lock)) {
-                ut_throw(NULL);
-                ut_raise();
-            }
-        }
+
+        ut_err_notifyCallkback(kind, msgBody);
 
         if (alloc) {
             free(alloc);
@@ -1415,7 +1367,7 @@ void _ut_log_pop(
         if (!frame->printed && UT_LOG_PROFILE) {
             printed = true;
             ut_logprint(
-                stderr, UT_LOG_FMT_CURRENT, UT_INFO, NULL, file, line, function, NULL, FALSE, TRUE);
+                stdout, UT_LOG_FMT_CURRENT, UT_INFO, NULL, file, line, function, NULL, FALSE, TRUE);
         }
 
         if (strcmp(frame->initial.function, function)) {
@@ -1430,7 +1382,7 @@ void _ut_log_pop(
                     function, frame->initial.function),
                 empty_list,
                 false,
-                stderr,
+                stdout,
                 false);
         }
 
@@ -1451,7 +1403,7 @@ void _ut_log_pop(
                 char *indent = ut_log_categoryIndent(data->categories, 0, UT_DEBUG);
                 /* Print everything that preceeds the category */
                 ut_logprint(
-                    stderr, UT_LOG_FMT_CURRENT, UT_INFO, data->categories, file, line, NULL, NULL, TRUE, TRUE);
+                    stdout, UT_LOG_FMT_CURRENT, UT_INFO, data->categories, file, line, NULL, NULL, TRUE, TRUE);
                 ut_log(
                     "%s#[grey]+#[reset]\n", indent ? indent : "");
                 if (indent) free(indent);
@@ -1507,7 +1459,7 @@ void ut_tracev(
     const char *fmt,
     va_list args)
 {
-    ut_logv(file, line, function, UT_TRACE, 0, fmt, args, true, stderr, false);
+    ut_logv(file, line, function, UT_TRACE, 0, fmt, args, true, stdout, false);
 }
 
 void ut_warningv(
@@ -1540,7 +1492,7 @@ void ut_okv(
     const char *fmt,
     va_list args)
 {
-    ut_logv(file, line, function, UT_OK, 0, fmt, args, true, stderr, false);
+    ut_logv(file, line, function, UT_OK, 0, fmt, args, true, stdout, false);
 }
 
 void ut_infov(
@@ -1550,7 +1502,7 @@ void ut_infov(
     const char *fmt,
     va_list args)
 {
-    ut_logv(file, line, function, UT_INFO, 0, fmt, args, true, stderr, false);
+    ut_logv(file, line, function, UT_INFO, 0, fmt, args, true, stdout, false);
 }
 
 void _ut_log_overwritev(
@@ -1561,7 +1513,7 @@ void _ut_log_overwritev(
     const char *fmt,
     va_list args)
 {
-    ut_logv(file, line, function, verbosity, 0, fmt, args, true, stderr, true);
+    ut_logv(file, line, function, verbosity, 0, fmt, args, true, stdout, true);
 }
 
 static
@@ -1926,6 +1878,12 @@ void ut_log_embedCategories(
 }
 
 int16_t ut_log_init(void) {
+#ifdef _WIN32
+    #if NTDDI_VERSION > NTDDI_WINBLUE
+    ut_enable_console_color(STD_OUTPUT_HANDLE);
+    ut_enable_console_color(STD_ERROR_HANDLE);
+    #endif
+#endif
     return ut_tls_new(&UT_KEY_LOG, ut_lasterrorFree);
 }
 
@@ -1940,23 +1898,13 @@ void ut_log(char *fmt, ...) {
     ut_log_tlsData *data = ut_getThreadData();
     int len;
 
-    ut_log_clearLine(data);
-
     va_start(arglist, fmt);
     formatted = ut_vasprintf(fmt, arglist);
     va_end(arglist);
 
     colorized = ut_log_colorize(formatted);
     len = printlen(colorized);
-    fprintf(stderr, "%s", colorized);
-
-    /* If no newline is printed, keep track of how many backtrace characters
-     * need to ba appended before printing the next log statement */
-    if (colorized[strlen(colorized) - 1] != '\n') {
-        data->last_printed_len = len;
-        ut_log_resetCursor(data);
-        fflush(stderr);
-    }
+    fprintf(stdout, "%s", colorized);
 
     free(colorized);
     free(formatted);

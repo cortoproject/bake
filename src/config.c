@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 Sander Mertens
+/* Copyright (c) 2010-2019 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -20,6 +20,9 @@
  */
 
 #include "bake.h"
+
+static bool env_found = false;
+static bool cfg_found = false;
 
 static
 bool bake_config_var_is_valid(
@@ -56,16 +59,32 @@ static
 void bake_config_add_var(
     bake_config *config,
     const char *var,
-    const char *val)
+    const char *value,
+    bool append)
 {
     int32_t index = bake_config_var_is_set(config, var);
     if (index == -1) {
-        if (!val) val = "";
+        /* Variable hasn't been set yet */
+        if (!value) value = "";
         ut_ll_append(config->env_variables, ut_strdup(var));
-        ut_ll_append(config->env_values, ut_strdup(val));
-    } else if (val) {
-        ut_ll_set(config->env_variables, index, ut_strdup(var));
-        ut_ll_set(config->env_values, index, ut_strdup(val));
+        ut_ll_append(config->env_values, ut_strdup(value));
+    } else if (value) {
+        /* Previous value has been set */
+        if (append) {
+            char *old_value = ut_ll_get(config->env_values, index);
+            if (old_value) {
+                char *new_value = ut_asprintf("%s"UT_ENV_PATH_SEPARATOR"%s",
+                    old_value, value);
+                    
+                ut_ll_set(config->env_values, index, new_value);
+
+                free(old_value);
+            } else {
+                ut_ll_set(config->env_values, index, ut_strdup(value));
+            }
+        } else {
+            ut_ll_set(config->env_values, index, ut_strdup(value));
+        }
     }
 }
 
@@ -88,6 +107,8 @@ int16_t bake_config_loadEnvironment(
         /* Accept both arrays and strings */
         const char *j_str = json_object_get_string(envcfg, var);
         char *value = (char*)j_str;
+        bool append = false;
+
         if (!value) {
             JSON_Value *j_value = json_object_get_value(envcfg, var);
             if (json_value_get_type(j_value) == JSONArray) {
@@ -97,18 +118,22 @@ int16_t bake_config_loadEnvironment(
                 for (i = 0; i < count; i ++) {
                     const char *el = json_array_get_string(j_array, i);
                     if (i) {
-                        ut_strbuf_appendstr(&buf, ":");
+                        ut_strbuf_appendstr(&buf, UT_ENV_PATH_SEPARATOR);
                     }
                     ut_strbuf_appendstr(&buf, el);
                 }
                 value = ut_strbuf_get(&buf);
+
+                /* Append to, not replace previous value (if any) */
+                append = true;
             } else {
                 ut_throw("invalid value for environment variable '%s'", var);
                 goto error;
             }
         }
 
-        bake_config_add_var(cfg_out, var, value);
+        bake_config_add_var(cfg_out, var, value, append);
+
         if (j_str != value) {
             free(value);
         }
@@ -203,19 +228,6 @@ error:
 }
 
 static
-void bake_config_appendEnv(
-    const char *env,
-    const char *value)
-{
-    char *existing = ut_getenv(env);
-    if (!existing || !strlen(existing)) {
-        ut_setenv(env, value);
-    } else {
-        ut_setenv(env, strarg("%s:%s", value, existing));
-    }
-}
-
-static
 void bake_config_setEnv(
     bake_config *cfg)
 {
@@ -261,6 +273,9 @@ int16_t bake_config_load_file (
         if (!section) {
             goto not_found;
         }
+
+        env_found = true;
+
         if (bake_config_loadEnvironment(cfg_out, section)) {
             goto error;
         }
@@ -278,6 +293,9 @@ int16_t bake_config_load_file (
         if (!section) {
             goto not_found;
         }
+
+        cfg_found = true;
+
         if (bake_config_loadConfiguration(section, cfg_out)) {
             goto error;
         }
@@ -320,13 +338,12 @@ ut_ll bake_config_find_files(
     char *cur_path = path;
 
     char *path_parsed = ut_envparse(path);
-
-    if (path_parsed[0] == '/') {
+    if (!ut_path_is_relative(path_parsed)) {
         /* Absolute path */
         cur_path = strdup(path_parsed);
     } else {
         /* Relative path */
-        cur_path = ut_asprintf("%s/%s", ut_cwd(), path_parsed);
+        cur_path = ut_asprintf("%s"UT_OS_PS"%s", ut_cwd(), path_parsed);
         ut_path_clean(cur_path, cur_path);
     }
 
@@ -335,10 +352,10 @@ ut_ll bake_config_find_files(
     /* Check for a bake in the current path */
     char *elem = NULL;
     do {
-        char *file = ut_asprintf("%s/bake", cur_path);
+        char *file = ut_asprintf("%s"UT_OS_PS"bake%s", cur_path, UT_OS_BIN_EXT);
         if (ut_file_test(file) == 1) {
             if (ut_isdir(file)) {
-                char *cfg = ut_asprintf("%s/bake.json", file);
+                char *cfg = ut_asprintf("%s"UT_OS_PS"bake.json", file);
                 if (ut_file_test(cfg) == 1) {
                     if (!config_files) config_files = ut_ll_new();
                     ut_ll_append(config_files, cfg);
@@ -354,7 +371,7 @@ ut_ll bake_config_find_files(
         }
 
 
-        file = ut_asprintf("%s/bake.json", cur_path);
+        file = ut_asprintf("%s"UT_OS_PS"bake.json", cur_path);
         if (ut_file_test(file) == 1) {
             if (!config_files) config_files = ut_ll_new();
             ut_ll_append(config_files, file);
@@ -364,7 +381,7 @@ ut_ll bake_config_find_files(
         }
 
         /* Strip last directory from path */
-        elem = strrchr(cur_path, '/');
+        elem = strrchr(cur_path, UT_OS_PS[0]);
         if (elem) {
             *elem = '\0';
         }
@@ -379,7 +396,7 @@ ut_ll bake_config_find_config(void)
     ut_ll config_files = NULL;
 
     if (ut_getenv("BAKE_HOME")) {
-        char *file = ut_asprintf("%s/bake.json", ut_getenv("BAKE_HOME"));
+        char *file = ut_asprintf("%s"UT_OS_PS"bake.json", ut_getenv("BAKE_HOME"));
         if (ut_file_test(file) == 1) {
             config_files = ut_ll_new();
             ut_ll_append(config_files, file);
@@ -397,9 +414,7 @@ ut_ll bake_config_find_config(void)
 
 int16_t bake_config_load(
     bake_config *cfg_out,
-    const char *cfg_id,
-    const char *env_id,
-    bool build_to_home)
+    const char *env_id)
 {
     /* Use default configuration and environment */
     cfg_out->env_variables = ut_ll_new();
@@ -412,18 +427,34 @@ int16_t bake_config_load(
         if (bake_config_load_config(
             config_files,
             cfg_out,
-            cfg_id,
+            UT_CONFIG,
             env_id))
         {
             goto error;
         }
-    } else {
-        ut_ok("no bake configuration files found, use defaults");
+    }
+
+    if (!cfg_found) {
+        if (!strcmp(UT_CONFIG, "debug")) {
+            ut_ok("debug configuration not found in bake settings file, using defaults");
+        } else if (!strcmp(UT_CONFIG, "release")) {
+            ut_ok("release configuration not found in bake settings file, using defaults");
+            cfg_out->optimizations = true;
+            cfg_out->debug = false;
+        } else {
+            ut_throw("unknown configuration '%s'",
+                UT_CONFIG);
+            goto error;
+        }
     }
 
     /* Set BAKE_HOME to a default value if the config didn't specify it */
     if (!ut_getenv("BAKE_HOME")) {
+#ifndef _WIN32
         char *bake_home = ut_envparse("~/bake");
+#else
+        char *bake_home = ut_envparse("~\\bake");
+#endif
         if (!bake_home) {
             ut_throw(NULL);
             goto error;
@@ -442,23 +473,25 @@ int16_t bake_config_load(
     }
 
     /* Ensure these environment variables are part of the bake environment */
-    bake_config_add_var(cfg_out, "BAKE_HOME", ut_getenv("BAKE_HOME"));
-    bake_config_add_var(cfg_out, "BAKE_TARGET", ut_getenv("BAKE_TARGET"));
-    bake_config_add_var(cfg_out, "BAKE_CONFIG", cfg_id);
-    bake_config_add_var(cfg_out, "BAKE_ENVIRONMENT", env_id);
-    bake_config_add_var(cfg_out, "BAKE_PLATFORM", UT_PLATFORM_STRING);
-    bake_config_add_var(cfg_out, "PATH", ut_getenv("PATH"));
-    bake_config_add_var(cfg_out, "LD_LIBRARY_PATH", NULL);
-    bake_config_add_var(cfg_out, "CLASSPATH", NULL);
+    bake_config_add_var(cfg_out, "BAKE_HOME", ut_getenv("BAKE_HOME"), false);
+    bake_config_add_var(cfg_out, "BAKE_TARGET", ut_getenv("BAKE_TARGET"), false);
+    bake_config_add_var(cfg_out, "BAKE_PLATFORM", UT_PLATFORM_STRING, false);
+    bake_config_add_var(cfg_out, "PATH", ut_getenv("PATH"), true);
+    bake_config_add_var(cfg_out, "CLASSPATH", ut_getenv("CLASSPATH"), true);
+    if (!ut_os_match("windows")) {
+        bake_config_add_var(cfg_out, "LD_LIBRARY_PATH", ut_getenv("LD_LIBRARY_PATH"), true);
+    }
     if (ut_os_match("darwin")) {
-        bake_config_add_var(cfg_out, "DYLD_LIBRARY_PATH", NULL);
+        bake_config_add_var(cfg_out, "DYLD_LIBRARY_PATH", ut_getenv("DYLD_LIBRARY_PATH"), true);
     }
 
     /* Ensure that these environment variables are set, so no errors are thrown
      * when they are referenced by the configuration */
-    if (!ut_getenv("PATH"))            ut_setenv("PATH", "");
-    if (!ut_getenv("LD_LIBRARY_PATH")) ut_setenv("LD_LIBRARY_PATH", "");
-    if (!ut_getenv("CLASSPATH"))       ut_setenv("CLASSPATH", "");
+    if (!ut_getenv("PATH")) ut_setenv("PATH", "");
+    if (!ut_os_match("windows")) {
+        if (!ut_getenv("LD_LIBRARY_PATH")) ut_setenv("LD_LIBRARY_PATH", "");
+    }
+    if (!ut_getenv("CLASSPATH")) ut_setenv("CLASSPATH", "");
     if (ut_os_match("darwin")) {
         if (!ut_getenv("DYLD_LIBRARY_PATH")) ut_setenv("DYLD_LIBRARY_PATH", "");
     }
@@ -467,26 +500,12 @@ int16_t bake_config_load(
     bake_config_setEnv(cfg_out);
 
     /* Precompute bake paths */
-    cfg_out->configuration = ut_strdup(cfg_id);
-    if (!build_to_home) {
-        cfg_out->target = ut_asprintf(
-            "%s/%s-%s", ut_getenv("BAKE_TARGET"),
-            UT_PLATFORM_STRING, cfg_out->configuration);
-    } else {
-        cfg_out->target = ut_strdup(ut_getenv("BAKE_HOME"));
-    }
-
-    cfg_out->home = ut_strdup(ut_getenv("BAKE_HOME"));
-    cfg_out->home_lib = ut_asprintf("%s/lib", cfg_out->home);
-    cfg_out->home_bin = ut_asprintf("%s/bin", cfg_out->home);
-    cfg_out->target_lib = ut_asprintf("%s/lib", cfg_out->target);
-    cfg_out->target_bin = ut_asprintf("%s/bin", cfg_out->target);
-
-    /* Append bake environment to PATH. (DY)LD_LIBRARY_PATH and CLASSPATH */
-    bake_config_appendEnv("PATH", strarg("~/bake:%s:%s", cfg_out->target_bin, cfg_out->home_bin));
-    bake_config_appendEnv("LD_LIBRARY_PATH", strarg(".:%s:%s", cfg_out->target_lib, cfg_out->home_lib));
-    bake_config_appendEnv("DYLD_LIBRARY_PATH", strarg(".:%s:%s", cfg_out->target_lib, cfg_out->home_lib));
-    bake_config_appendEnv("CLASSPATH", strarg(".:%s/java", cfg_out->target));
+    cfg_out->configuration = ut_strdup(UT_CONFIG);
+    cfg_out->platform = UT_PLATFORM_PATH;
+    cfg_out->target = UT_TARGET_PATH;
+    cfg_out->home = UT_HOME_PATH;
+    cfg_out->lib = UT_LIB_PATH;
+    cfg_out->bin = UT_BIN_PATH;
 
     if (ut_log_verbosityGet() <= UT_OK) {
         ut_log_push("environment");

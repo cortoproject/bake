@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 Sander Mertens
+/* Copyright (c) 2010-2019 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -26,6 +26,12 @@
 #include "util/include/util.h"
 #else
 #include <bake.util>
+#endif
+
+#ifdef _WIN32
+#define BAKE_EXEC "bake2"
+#else
+#define BAKE_EXEC "bake"
 #endif
 
 typedef struct bake_project bake_project;

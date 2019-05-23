@@ -173,7 +173,7 @@ ut_ll gather_files(
         char *file = ut_iter_next(&it);
         if (filter_file(file)) {
             ut_fileMonitor *m = monitor_new(
-                strarg("%s/%s", project_dir, file), app_bin);
+                strarg("%s"UT_OS_PS"%s", project_dir, file), app_bin);
             ut_ll_append(result, m);
         }
     }
@@ -266,17 +266,23 @@ int build_project(
     int8_t procResult = 0;
 
     /* Build */
-    ut_proc pid = ut_proc_run("bake", (const char*[]){
-        "bake",
+    ut_proc pid = ut_proc_run(BAKE_EXEC, (const char*[]){
+        BAKE_EXEC,
         (char*)path,
+        "-r",
          NULL
     });
+
+    if (!pid) {
+        ut_throw("failed to invoke bake %s -r", path);
+        goto error;
+    }
 
     if (ut_proc_wait(pid, &procResult) || procResult) {
         ut_throw("failed to build '%s'", path);
 
         /* Ensure that the binary folder is gone */
-        ut_rm(strarg("%s/bin", path));
+        ut_rm(strarg("%s"UT_OS_PS"bin", path));
         goto error;
     }
 
@@ -290,13 +296,26 @@ ut_proc run_exec(
     const char *exec,
     const char *app_id,
     bool is_package,
+    int argc,
     const char *argv[])
 {
     if (!is_package) {
-        ut_proc pid = ut_proc_run(exec, argv);
+        const char *local_argv[1024] = {(char*)exec};
+        int i = 1;
 
-        ut_log("run   '%s' [%u] (%s)\n",
-            app_id, pid, exec);
+        if (argc) {
+            if (argv) {
+                for (i = 1; i < argc; i ++) {
+                    local_argv[i] = argv[i - 1];
+                }
+            }
+        }
+
+        local_argv[i] = NULL;
+
+        ut_proc pid = ut_proc_run(exec, local_argv);
+
+        bake_message(UT_LOG, "run", "#[green]application#[reset] %s [%u] '%s'", app_id, pid, exec);
 
         return pid;
     } else {
@@ -311,6 +330,7 @@ int16_t run_interactive(
     const char *app_bin,
     const char *app_id,
     bool is_package,
+    int argc,
     const char *argv[])
 {
     ut_proc pid = 0, last_pid = 0;
@@ -342,28 +362,13 @@ int16_t run_interactive(
         /* Test whether the app exists, then start it */
         if (ut_file_test(app_bin)) {
             if (retries && !pid) {
-                ut_log("restart '%s' (%dx)\n",
-                    app_id, retries);
+                bake_message(UT_LOG, "restart", "#[green]application#[reset] %s (%dx)", app_id, retries);
             }
 
             if (!pid) {
-
                 /* Run process, ensure process binary is first argument */
                 {
-                    const char *local_argv[1024] = {(char*)app_bin};
-
-                    int i = 1;
-
-                    if (argv) {
-                        while (argv[i - 1]) {
-                            local_argv[i] = argv[i - 1];
-                            i ++;
-                        }
-                    }
-
-                    local_argv[i] = NULL;
-
-                    pid = run_exec(app_bin, app_id, is_package, local_argv);
+                    pid = run_exec(app_bin, app_id, is_package, argc, argv);
                     last_pid = pid;
                 }
             }
@@ -391,10 +396,8 @@ int16_t run_interactive(
             if ((retcode == 11) || (retcode == 6)) {
                 ut_error("segmentation fault, fix your code!");
             } else {
-                ut_log("done  '%s' [%d] (%s)\n",
-                    app_id, last_pid, app_bin);
-                ut_log("#[grey]  press Ctrl-C to exit or change files to restart\n",
-                    last_pid);
+                bake_message(UT_LOG, "done", "#[green]application#[reset] %s [%d] '%s'", app_id, last_pid, app_bin);
+                bake_message(UT_LOG, "", "press Ctrl-C to exit or change files to restart", app_id, last_pid, app_bin);
             }
 
             changed = wait_for_changes(
@@ -418,14 +421,24 @@ bool is_valid_project(
     const char *project)
 {
     /* Test if directory exists */
-    if (ut_file_test(project) && ut_isdir(project)) {
-        /* Test if specified directory has project.json */
-        if (ut_file_test(strarg("%s/project.json", project))) {
-            /* Valid bake project found */
-            return true;
-        }
+    if (ut_file_test(project) != 1) {
+        ut_throw("project directory '%s' does not exist", project);
+        goto error;
     }
 
+    if (!ut_isdir(project)) {
+        ut_throw("file '%s' is not a directory", project);
+        goto error;
+    }
+
+    char *project_json = ut_asprintf("%s"UT_OS_PS"project.json", project);
+    if (ut_file_test(project_json) != 1) {
+        ut_throw("cannot find or load file '%s'", project_json);
+        goto error;
+    }
+
+    return true;
+error:
     return false;
 }
 
@@ -433,7 +446,7 @@ static
 char *name_from_id(
     const char *id)
 {
-    if (id[0] == '/') {
+    if (id[0] == UT_OS_PS[0]) {
         id ++;
     }
 
@@ -481,6 +494,8 @@ int bake_run(
         /* First check if passed argument is a valid directory */
         if (is_valid_project(app_id)) {
             project_dir = (char*)app_id;
+        } else {
+            ut_catch();
         }
 
         /* If project is not found, lookup in package repositories */
@@ -493,9 +508,14 @@ int bake_run(
 
             /* Check if the package repository contains a link back to the
              * location of the project. */
-            char *source_file = ut_asprintf("%s/source.txt", package_path);
-            if (ut_file_test(source_file)) {
+            char *source_file = ut_asprintf("%s"UT_OS_PS"source.txt", package_path);
+            if (ut_file_test(source_file) == 1) {
                 project_dir = ut_file_load(source_file);
+                if (!project_dir) {
+                    ut_throw("file '%s' does not contain project path", source_file);
+                    goto error;
+                }
+
                 str_strip(project_dir); /* Remove trailing whitespace */
 
                 if (!is_valid_project(project_dir)) {
@@ -503,10 +523,13 @@ int bake_run(
                      * give up yet, maybe the project got moved. */
                     ut_warning(
                         "package '%s' points to project folder '%s'"
-                        " which does not contain a valid bake project",
+                        " which is not a valid bake project. Attempting"
+                        " to run existing binary, which may be outdated.",
                         app_id, project_dir);
                     project_dir = NULL;
                 }
+            } else {
+                ut_warning("could not find a source directory for '%s'", app_id);
             }
         }
         /* Test if current directory is a valid project */
@@ -533,12 +556,8 @@ int bake_run(
         is_package = project->type == BAKE_PACKAGE;
 
         /* If project is found, point to executable in project bin */
-        app_bin = ut_asprintf(
-            "%s/bin/%s-%s/%s",
-            project_dir,
-            UT_PLATFORM_STRING,
-            config->configuration,
-            app_name);
+        app_bin = ut_asprintf("%s"UT_OS_PS"bin"UT_OS_PS"%s-%s"UT_OS_PS"%s",
+            project_dir, UT_PLATFORM_STRING, config->configuration, app_name);
     } else {
         /* If project directory is not found, locate the binary in the
          * package repository. This only allows for running the
@@ -572,7 +591,7 @@ int bake_run(
 
     if (interactive) {
         /* Run process & monitor source for changes */
-        if (run_interactive(project_dir, app_bin, app_id, is_package, argv)) {
+        if (run_interactive(project_dir, app_bin, app_id, is_package, argc, argv)) {
             goto error;
         }
     } else {
@@ -580,13 +599,15 @@ int bake_run(
         ut_proc pid;
         ut_trace("starting process '%s'", app_bin);
 
-        ut_try( build_project(project_dir), "build failed, cannot run");
+        if (project_dir) {
+            ut_try( build_project(project_dir), "build failed, cannot run");
+        }
 
         if (argc) {
-            pid = run_exec(app_bin, app_id, is_package, argv);
+            pid = run_exec(app_bin, app_id, is_package, argc, argv);
         } else {
             pid = run_exec(
-              app_bin, app_id, is_package, (const char*[]){
+              app_bin, app_id, is_package, 1, (const char*[]){
                   (char*)app_bin, NULL});
         }
         if (!pid) {
@@ -599,14 +620,29 @@ int bake_run(
         if ((sig = ut_proc_wait(pid, &result)) || result) {
             if (sig > 0) {
                 ut_throw("process crashed (%d)", sig);
-                goto error;
-            } else {
-                ut_throw("process returned %d", result);
-                goto error;
+                ut_raise();
+
+                ut_strbuf cmd_args = UT_STRBUF_INIT;
+                int i;
+                for (i = 1; i < argc; i ++) {
+                    ut_strbuf_appendstr(&cmd_args, argv[i]);
+                }
+
+                char *args = ut_strbuf_get(&cmd_args);
+
+                printf("\n");
+                printf("to debug your application, do:\n");
+                ut_log("  export $(bake env)\n");
+                ut_log("  %s %s\n", app_bin, args ? args : "");
+                printf("\n");
+
+                free(args);
             }
+
+            goto error;
         }
 
-        ut_log("done  '%s' [%u] (%s)\n",
+        bake_message(UT_LOG, "done", "#[green]application#[reset] %s [%u] '%s'", 
             app_id, pid, app_bin);
     }
 

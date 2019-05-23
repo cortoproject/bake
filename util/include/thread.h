@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 Sander Mertens
+/* Copyright (c) 2010-2019 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -36,8 +36,11 @@ typedef struct ut_sem_s* ut_sem;
 
 
 /* -- Thread management -- */
-
+#ifdef _WIN32
+typedef HANDLE ut_thread;
+#else
 typedef unsigned long int ut_thread;
+#endif
 typedef void* (*ut_thread_cb)(void*);
 
 /** Create new thread.
@@ -313,6 +316,15 @@ int ut_cond_new(
  */
 UT_EXPORT
 int ut_cond_signal(
+    ut_cond cond);
+
+/** Broadcast condition variable.
+ *
+ * @param cond Pointer to initialized condition variable.
+ * @return 0 if success, non-zero if failed.
+ */
+UT_EXPORT
+int ut_cond_broadcast(
     ut_cond cond);
 
 /** Wait for condition variable.

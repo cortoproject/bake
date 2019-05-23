@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 Sander Mertens
+/* Copyright (c) 2010-2019 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -32,7 +32,11 @@ extern "C" {
 #endif
 
 /** Process handle */
+#ifdef _WIN32
+typedef HANDLE ut_proc;
+#else
 typedef int ut_proc;
+#endif
 
 /** Process signals */
 typedef enum ut_procsignal {

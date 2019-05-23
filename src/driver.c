@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 Sander Mertens
+/* Copyright (c) 2010-2019 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -85,7 +85,9 @@ int16_t bake_node_addToTarget(
     bake_rule_target *target)
 {
     const char *pattern = NULL;
-    if (target->kind == BAKE_RULE_TARGET_PATTERN) {
+    if (target->kind == BAKE_RULE_TARGET_PATTERN || 
+        target->kind == BAKE_RULE_TARGET_FILE) 
+    {
         pattern = target->is.pattern;
     }
 
@@ -137,6 +139,26 @@ void bake_driver_pattern(
 
     } else {
         bake_node_add(driver, bake_pattern_new(name, pattern));
+    }
+}
+
+static
+void bake_driver_file(
+    bake_driver *driver,
+    const char *name,
+    const char *file)
+{
+    bake_node *n;
+    if ((n = bake_node_find(driver, name))) {
+        if (n->kind != BAKE_RULE_FILE) {
+            driver->error = 1;
+            ut_error("'%s' redeclared as pattern", name);
+        } else {
+            ((bake_pattern*)n)->pattern = file;
+        }
+
+    } else {
+        bake_node_add(driver, bake_file_pattern_new(name, file));
     }
 }
 
@@ -201,6 +223,15 @@ void bake_driver_pattern_cb(
 }
 
 static
+void bake_driver_file_cb(
+    const char *name,
+    const char *pattern)
+{
+    bake_driver *driver = ut_tls_get(BAKE_DRIVER_KEY);
+    bake_driver_file(driver, name, pattern);
+}
+
+static
 void bake_driver_rule_cb(
     const char *name,
     const char *source,
@@ -248,6 +279,16 @@ bake_rule_target bake_driver_target_pattern_cb(
 }
 
 static
+bake_rule_target bake_driver_target_file_cb(
+    const char *pattern)
+{
+    bake_rule_target result;
+    result.kind = BAKE_RULE_TARGET_FILE;
+    result.is.pattern = pattern;
+    return result;
+}
+
+static
 bake_rule_target bake_driver_target_map_cb(
     bake_rule_map_cb mapping)
 {
@@ -287,6 +328,14 @@ void bake_driver_prebuild_cb(
 {
     bake_driver *driver = ut_tls_get(BAKE_DRIVER_KEY);
     driver->impl.prebuild = prebuild;
+}
+
+static
+void bake_driver_build_cb(
+    bake_driver_cb build)
+{
+    bake_driver *driver = ut_tls_get(BAKE_DRIVER_KEY);
+    driver->impl.build = build;
 }
 
 static
@@ -337,7 +386,9 @@ bool bake_driver_get_bool_attr_cb(
     bake_driver *driver = ut_tls_get(BAKE_DRIVER_KEY);
     bake_project *project = ut_tls_get(BAKE_PROJECT_KEY);
     bake_attr *attr = bake_project_get_attr(project, driver->id, name);
+
     if (!attr) {
+        ut_warning("attribute '%s' not found", name);
         return false;
     }
 
@@ -345,7 +396,7 @@ bool bake_driver_get_bool_attr_cb(
         return attr->is.boolean;
     } else {
         project->error = true;
-        ut_throw("attribute '%s' is not of type boolean", name);
+        ut_error("attribute '%s' is not of type boolean", name);
         return false;
     }
 }
@@ -368,6 +419,34 @@ char* bake_driver_get_string_attr_cb(
         ut_throw("attribute '%s' is not of type string", name);
         return "";
     }
+}
+
+static
+ut_ll bake_driver_get_array_attr_cb(
+    const char *name)
+{
+    bake_driver *driver = ut_tls_get(BAKE_DRIVER_KEY);
+    bake_project *project = ut_tls_get(BAKE_PROJECT_KEY);
+    bake_attr *attr = bake_project_get_attr(project, driver->id, name);
+    if (!attr) {
+        return NULL;
+    }
+
+    if (attr->kind == BAKE_ARRAY) {
+        return attr->is.array ? attr->is.array : NULL;
+    } else {
+        project->error = true;
+        ut_throw("attribute '%s' is not of type array", name);
+        return NULL;
+    }
+}
+
+static
+JSON_Object* bake_driver_get_json_cb(void)
+{
+    bake_driver *driver = ut_tls_get(BAKE_DRIVER_KEY);
+    bake_project *project = ut_tls_get(BAKE_PROJECT_KEY);
+    return bake_project_get_json(project, driver->id);
 }
 
 static
@@ -517,19 +596,52 @@ void bake_driver_import_cb(
     }
 }
 
+static
+bake_driver* bake_driver_lookup_driver_cb(
+    const char *id)
+{
+    bake_driver *requested_driver = bake_driver_get_intern(id, NULL);
+    if (!requested_driver) {
+        bake_driver *driver = ut_tls_get(BAKE_DRIVER_KEY);
+        driver->error = true;
+    }
+    return requested_driver;
+}
+
+static
+bake_driver* bake_driver_current_driver_cb(void)
+{
+    return ut_tls_get(BAKE_DRIVER_KEY);
+}
+
+static
+bake_driver* bake_driver_set_cb(
+    bake_driver *driver)
+{
+    bake_driver *result = ut_tls_get(BAKE_DRIVER_KEY);
+    ut_tls_set(BAKE_DRIVER_KEY, driver);
+    return result;
+}
+
 /* Initialize driver API */
 bake_driver_api bake_driver_api_impl = {
     .import = bake_driver_import_cb,
+    .lookup_driver = bake_driver_lookup_driver_cb,
+    .current_driver = bake_driver_current_driver_cb,
+    .set_driver = bake_driver_set_cb,
     .pattern = bake_driver_pattern_cb,
+    .file = bake_driver_file_cb,
     .rule = bake_driver_rule_cb,
     .dependency_rule = bake_driver_dependency_rule_cb,
     .condition = bake_driver_condition_cb,
     .target_pattern = bake_driver_target_pattern_cb,
+    .target_file = bake_driver_target_file_cb,
     .target_map = bake_driver_target_map_cb,
     .init = bake_driver_init_cb,
     .setup = bake_driver_setup_cb,
     .generate = bake_driver_generate_cb,
     .prebuild = bake_driver_prebuild_cb,
+    .build = bake_driver_build_cb,
     .postbuild = bake_driver_postbuild_cb,
     .artefact = bake_driver_artefact_cb,
     .link_to_lib = bake_driver_link_to_lib_cb,
@@ -543,6 +655,8 @@ bake_driver_api bake_driver_api_impl = {
     .get_attr = bake_driver_get_attr_cb,
     .get_attr_bool = bake_driver_get_bool_attr_cb,
     .get_attr_string = bake_driver_get_string_attr_cb,
+    .get_attr_array = bake_driver_get_array_attr_cb,
+    .get_json = bake_driver_get_json_cb,
     .set_attr_bool = bake_driver_set_attr_bool_cb,
     .set_attr_string = bake_driver_set_attr_string_cb,
     .set_attr_array = bake_driver_set_attr_array_cb
@@ -718,6 +832,31 @@ int16_t bake_driver__prebuild(
 
     return 0;
 }
+
+int16_t bake_driver__build(
+    bake_driver *driver,
+    bake_config *config,
+    bake_project *project)
+{
+    if (driver->impl.build) {
+        bake_driver *old_driver = ut_tls_get(BAKE_DRIVER_KEY);
+        ut_tls_set(BAKE_DRIVER_KEY, driver);
+        bake_project *old_project = ut_tls_get(BAKE_PROJECT_KEY);
+        ut_tls_set(BAKE_PROJECT_KEY, project);
+
+        driver->impl.build(&bake_driver_api_impl, config, project);
+
+        ut_tls_set(BAKE_DRIVER_KEY, old_driver);
+        ut_tls_set(BAKE_PROJECT_KEY, old_project);
+
+        if (project->error) {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
 
 int16_t bake_driver__postbuild(
     bake_driver *driver,

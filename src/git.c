@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 Sander Mertens
+/* Copyright (c) 2010-2019 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -55,6 +55,7 @@ int16_t git_pull(
 
     return 0;
 error:
+    ut_raise();
     return -1;
 }
 
@@ -68,6 +69,11 @@ int16_t bake_parse_repo_url(
 {
     bool has_protocol = false;
     bool has_url = false;
+
+    *full_url_out = NULL;
+    *base_url_out = NULL;
+    *name_out = NULL;
+    *src_out = NULL;
 
     char *proto = strchr(url, '/');
     if (proto) {
@@ -108,7 +114,7 @@ int16_t bake_parse_repo_url(
           url);
     }
 
-    char *src_path = ut_envparse("$BAKE_HOME/src/%s", name);
+    char *src_path = ut_envparse("%s"UT_OS_PS"%s", UT_SRC_PATH, name);
 
     char *last_elem = strrchr(full_url, '/');
     char *base_url = NULL;
@@ -155,28 +161,31 @@ int16_t bake_update_dependency_list(
             }
         }
 
-        const char *src = ut_locate(dep, NULL, UT_LOCATE_SOURCE);
-        if (src) {
+        const char *src_path = ut_locate(dep, NULL, UT_LOCATE_SOURCE);
+        if (src_path) {
             /* If source is in bake environment, pull latest version */
-            ut_log("pull '%s' in '%s'\n", dep, src);
-            git_pull(src);
+            bake_message(UT_LOG, "pull", "#[green]package#[reset] %s in '%s'", dep, src_path);
+            git_pull(src_path);
         } else {
             /* If source is a project under development, just build it */
-            src = ut_locate(dep, NULL, UT_LOCATE_DEVSRC);
-            if (src) {
-                ut_log("found '%s' in '%s' (in dev tree, not pulling)\n", dep, src);
+            src_path = ut_locate(dep, NULL, UT_LOCATE_DEVSRC);
+            if (src_path) {
+                bake_message(UT_LOG, 
+                    "note", 
+                    "#[green]package#[reset] %s found in '%s' (in dev tree, not pulling)", 
+                    dep, src_path);
             }
         }
 
-        if (src) {
-            bake_project *dep_project = bake_project_new(src, config);
-            bake_crawler_add(config, dep_project);
+        if (src_path) {
+            bake_project *dep_project = bake_project_new(src_path, config);
+            if (bake_crawler_search(config, src_path) == -1) {
+                goto error;
+            }           
             ut_try( bake_update_dependencies(config, base_url, dep_project), NULL);
-        } else {
+        } else if (base_url) {
             if (ut_locate(dep, NULL, UT_LOCATE_PROJECT)) {
-                ut_log(
-                  "found '%s' but cloning anyway because source is missing\n",
-                  dep);
+                bake_message(UT_LOG, "note", "found '%s' but cloning anyway because source is missing", dep);
             }
 
             char *url = ut_asprintf("%s/%s", base_url, dep_tmp);
@@ -186,7 +195,12 @@ int16_t bake_update_dependency_list(
                     "cannot find repository '%s' in '%s'", dep_tmp, base_url);
                 goto error;
             }
+
             free(url);
+        } else {
+            ut_throw("cannot clone unresolved dependency '%s'", dep);
+            free(dep_tmp);
+            goto error;
         }
 
         free(dep_tmp);
@@ -210,32 +224,18 @@ error:
     return -1;
 }
 
-int16_t bake_update(
+int bake_update(
     bake_config *config,
-    const char *url)
+    bake_project *project)
 {
-    char *full_url = NULL, *base_url = NULL, *name = NULL, *src_path = NULL;
-    bake_project *project = NULL;
-    ut_try( bake_parse_repo_url(url, &full_url, &base_url, &name, &src_path), NULL);
+    char *git_path = ut_asprintf("%s/.git", project->path);
 
-    ut_log("update '%s' in '%s'\n", full_url, src_path);
-
-    git_pull(src_path);
-
-    project = bake_project_new(src_path, config);
-    if (!project) {
-        ut_throw("repository '%s' is not a valid bake project", full_url);
-        goto error;
+    if (ut_file_test(git_path)) {
+        git_pull(project->path);
     }
 
-    ut_try(bake_update_dependencies(config, base_url, project), NULL);
-
-    bake_crawler_add(config, project);
-
-    free(full_url);
-    free(base_url);
-    free(src_path);
-
+    free(git_path);
+    
     return 0;
 error:
     return -1;
@@ -250,12 +250,15 @@ int16_t bake_clone(
     ut_try( bake_parse_repo_url(url, &full_url, &base_url, &name, &src_path), NULL);
 
     if (ut_file_test(src_path) == 1) {
-        ut_trace("project '%s' already cloned, updating instead", name);
+        ut_error("project '%s' already cloned, try 'bake update'", name);
+
         free(full_url);
+        free(base_url);
         free(src_path);
-        return bake_update(config, url);
+
+        return -1;
     } else {
-        ut_log("clone '%s' into '%s'\n", full_url, src_path);
+        bake_message(UT_LOG, "clone", "'%s' into '%s'", full_url, src_path);
         char *gitcmd = ut_envparse("git clone -q %s %s", full_url, src_path);
         ut_try (cmd(gitcmd), NULL);
     }
@@ -267,7 +270,10 @@ int16_t bake_clone(
     }
 
     ut_try( bake_update_dependencies(config, base_url, project), NULL);
-    ut_try( bake_crawler_add(config, project), NULL);
+
+    if (bake_crawler_search(config, src_path) == -1) {
+        goto error;
+    }
 
     free(full_url);
     free(base_url);
@@ -324,14 +330,14 @@ int16_t bake_publish(
 
     command = ut_asprintf("git commit -m \"Published version %s\"", project->version);
     ut_try( cmd(command), NULL);
-    ut_log("#[green]OK #[normal]Committed version '%s'\n", project->version);
+    bake_message(UT_LOG, "done", "Committed version '%s'", project->version);
 
     command = ut_asprintf("git tag -a v%s -m \"Version v%s\"",
         project->version, project->version);
     ut_try( cmd(command), NULL);
-    ut_log("#[green]OK #[normal]Created tag 'v%s'\n", project->version);
+    bake_message(UT_LOG, "done", "Created tag 'v%s'", project->version);
 
-    ut_log("#[green]OK #[normal]Published %s:%s\n", project->id, project->version);
+    bake_message(UT_LOG, "done", "Published %s:%s", project->id, project->version);
 
     return 0;
 error:

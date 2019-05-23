@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 Sander Mertens
+/* Copyright (c) 2010-2019 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -30,14 +30,18 @@
 #include "crawler.h"
 #include "project.h"
 
+void bake_message(
+    int kind,
+    const char *bracket_txt,
+    const char *fmt,
+    ...);
+
 /* -- Configuration functions -- */
 
 /** Find bake config file(s), load specified configuration & environment */
 int16_t bake_config_load(
     bake_config *cfg_out,
-    const char *cfg_id,
-    const char *env_id,
-    bool build_to_home);
+    const char *env_id);
 
 /** Export variable to bake configuration */
 int16_t bake_config_export(
@@ -99,9 +103,9 @@ int16_t bake_clone(
     const char *url);
 
 /* Update from remote repository */
-int16_t bake_update(
+int bake_update(
     bake_config *config,
-    const char *url);
+    bake_project *project);
 
 /* Publish new version for repository */
 int16_t bake_publish(
@@ -137,13 +141,18 @@ int16_t bake_install_postbuild(
 int16_t bake_install_clear(
     bake_config *config,
     bake_project *project,
+    const char *project_id,
     bool uninstall);
 
-/** Remove files from config->target for project */
+/** Uninstall project from bake environment */
 int16_t bake_install_uninstall(
     bake_config *config,
     const char *project_id);
 
+/** Uninstall template from bake environment */
+int16_t bake_install_uninstall_template(
+    bake_config *config,
+    const char *project_id);
 
 /* -- Driver functions -- */
 
@@ -156,8 +165,9 @@ typedef struct bake_driver_impl {
     bake_link_to_lib_cb link_to_lib; /* Convert logical name to library name */
     bake_driver_cb setup;           /* Initialize directory with new project */
     bake_driver_cb generate;    /* Generate code or run code generation rules */
-    bake_driver_cb prebuild;        /* Initializes driver for project */
-    bake_driver_cb postbuild;       /* Initializes driver for project */
+    bake_driver_cb prebuild;        /* Stage before build stage */
+    bake_driver_cb build;           /* Called at build stage, before rules */
+    bake_driver_cb postbuild;       /* Stage after build */
     bake_driver_cb clean;           /* Specify files to clean */
 } bake_driver_impl;
 
@@ -222,6 +232,12 @@ int16_t bake_driver__prebuild(
     bake_config *config,
     bake_project *project);
 
+/* Prebuild step */
+int16_t bake_driver__build(
+    bake_driver *driver,
+    bake_config *config,
+    bake_project *project);
+
 /* Postbuild step */
 int16_t bake_driver__postbuild(
     bake_driver *driver,
@@ -281,7 +297,7 @@ int16_t bake_filelist_merge(
     bake_filelist *src);
 
 /** Return number of files in filelist */
-uint64_t bake_filelist_count(
+int bake_filelist_count(
     bake_filelist *fl);
 
 /* -- Rule API -- */
@@ -331,6 +347,11 @@ bake_node* bake_node_find(
 
 /** Create new pattern */
 bake_pattern* bake_pattern_new(
+    const char *name,
+    const char *pattern);
+
+/* Create a new file pattern */
+bake_pattern* bake_file_pattern_new(
     const char *name,
     const char *pattern);
 

@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 Sander Mertens
+/* Copyright (c) 2010-2019 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -48,11 +48,12 @@ struct bake_config {
 
     /* Set by configuration loader */
     char *home;              /* $BAKE_HOME */
-    char *target;            /* $BAKE_TARGET/<platform>-<configuration> */
-    char *home_bin;          /* $BAKE_HOME/bin */
-    char *home_lib;          /* $BAKE_HOME/lib */
-    char *target_bin;        /* $BAKE_TARGET/<platform>-<configuration>/bin */
-    char *target_lib;        /* $BAKE_TARGET/<platform>-<configuration>/lib */
+    char *meta;              /* $BAKE_HOME/meta */
+    char *tmpl;              /* $BAKE_HOME/template */
+    char *platform;          /* $BAKE_HOME/<platform> */
+    char *target;            /* $BAKE_HOME/<platform>/<configuration> */
+    char *bin;               /* $BAKE_HOME/<platform>-<configuration>/bin */
+    char *lib;               /* $BAKE_HOME/<platform>-<configuration>/lib */
 };
 
 #ifdef __cplusplus

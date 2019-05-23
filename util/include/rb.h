@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 Sander Mertens
+/* Copyright (c) 2010-2019 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -52,14 +52,6 @@ void ut_rb_set(
     ut_rb tree,
     const void* key,
     void* value);
-
-UT_EXPORT
-void* jsw_rbinsert (
-    jsw_rbtree_t *tree,
-    void* key,
-    void *data,
-    bool overwrite,
-    bool returnPtr );
 
 #define ut_rb_findOrSet(tree, key, value)\
     jsw_rbinsert((jsw_rbtree_t*)tree, (void*)key, value, FALSE, FALSE)

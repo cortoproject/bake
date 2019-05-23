@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 Sander Mertens
+/* Copyright (c) 2010-2019 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -22,7 +22,7 @@
 #include "../include/util.h"
 
 char* ut_hostname(void) {
-    ut_id buff;
+    char buff[256];
     gethostname(buff, sizeof(buff));
     return ut_setThreadString(buff);
 }
@@ -32,7 +32,7 @@ bool ut_os_match(
 {
     if (!stricmp(os, UT_OS_STRING) ||
 
-#ifdef __i386__
+#if defined(__i386__) || defined(_M_IX86)
         !stricmp(os, UT_OS_STRING "-x86") ||
         !stricmp(os, UT_OS_STRING "-i386") ||
         !stricmp(os, UT_OS_STRING "-i686") ||
@@ -43,7 +43,7 @@ bool ut_os_match(
         !stricmp(os, "i386") ||
         !stricmp(os, "i686"))
 
-#elif __x86_64__
+#elif defined(__x86_64__) || defined(_M_X64)
         !stricmp(os, UT_OS_STRING "-amd64") ||
         !stricmp(os, UT_OS_STRING "-x64") ||
         !stricmp(os, UT_OS_STRING "-x86_64") ||

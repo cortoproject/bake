@@ -14,26 +14,35 @@
  * dependencies will automatically show up in this file. Include bake_config.h
  * in your main project file. Do not edit! */
 
-#ifndef APP_HELLOWORLD_BAKE_CONFIG_H
-#define APP_HELLOWORLD_BAKE_CONFIG_H
+#ifndef EXAMPLES_CPP_APP_HELLOWORLD_BAKE_CONFIG_H
+#define EXAMPLES_CPP_APP_HELLOWORLD_BAKE_CONFIG_H
 
+/* Generated includes are specific to the bake environment. If a project is not
+ * built with bake, it will have to provide alternative methods for including
+ * its dependencies. */
+#ifdef __BAKE__
 /* Headers of public dependencies */
 /* No dependencies */
 
 /* Headers of private dependencies */
-#ifdef APP_HELLOWORLD_IMPL
+#ifdef EXAMPLES_CPP_APP_HELLOWORLD_IMPL
 /* No dependencies */
+#endif
 #endif
 
 /* Convenience macro for exporting symbols */
-#if APP_HELLOWORLD_IMPL && defined _MSC_VER
-#define APP_HELLOWORLD_EXPORT __declspec(dllexport)
-#elif APP_HELLOWORLD_IMPL
-#define APP_HELLOWORLD_EXPORT __attribute__((__visibility__("default")))
-#elif defined _MSC_VER
-#define APP_HELLOWORLD_EXPORT __declspec(dllimport)
+#ifndef EXAMPLES_CPP_APP_HELLOWORLD_STATIC
+  #if EXAMPLES_CPP_APP_HELLOWORLD_IMPL && defined _MSC_VER
+    #define EXAMPLES_CPP_APP_HELLOWORLD_EXPORT __declspec(dllexport)
+  #elif EXAMPLES_CPP_APP_HELLOWORLD_IMPL
+    #define EXAMPLES_CPP_APP_HELLOWORLD_EXPORT __attribute__((__visibility__("default")))
+  #elif defined _MSC_VER
+    #define EXAMPLES_CPP_APP_HELLOWORLD_EXPORT __declspec(dllimport)
+  #else
+    #define EXAMPLES_CPP_APP_HELLOWORLD_EXPORT
+  #endif
 #else
-#define APP_HELLOWORLD_EXPORT
+  #define EXAMPLES_CPP_APP_HELLOWORLD_EXPORT
 #endif
 
 #endif

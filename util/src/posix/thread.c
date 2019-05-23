@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 Sander Mertens
+/* Copyright (c) 2010-2019 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -19,7 +19,7 @@
  * THE SOFTWARE.
  */
 
-#include "../include/util.h"
+#include "../../include/util.h"
 
 ut_thread ut_thread_new(
     ut_thread_cb f,
@@ -346,6 +346,16 @@ int ut_cond_signal(
     int result = 0;
     if ((result = pthread_cond_signal(&cond->cond))) {
         ut_throw("cond_signal failed: %s", strerror(result));
+    }
+    return result;
+}
+
+int ut_cond_broadcast(
+    ut_cond cond)
+{
+    int result = 0;
+    if ((result = pthread_cond_broadcast(&cond->cond))) {
+        ut_throw("cond_broadcast failed: %s", strerror(result));
     }
     return result;
 }

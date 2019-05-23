@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 Sander Mertens
+/* Copyright (c) 2010-2019 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -26,6 +26,11 @@
 
 #ifndef UT_FS_H
 #define UT_FS_H
+
+#ifdef _WIN32
+#include <sys/stat.h>
+#include <errno.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -248,6 +253,27 @@ int ut_rmtree(
 UT_EXPORT
 time_t ut_lastmodified(
     const char *name);
+
+bool ut_dir_hasNext(
+    ut_iter *it);
+
+void* ut_dir_next(
+    ut_iter *it);
+
+void ut_dir_release(
+    ut_iter *it);
+
+
+#ifdef _WIN32
+typedef struct win_dirent_tag {
+    HANDLE hFind;
+    TCHAR cFileName[MAX_PATH];
+} ut_dirent;
+
+/* opendir is POSIX function which is not available on windows platform */
+ut_dirent* opendir(
+    const char *name);
+#endif
 
 #ifdef __cplusplus
 }

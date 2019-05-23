@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 Sander Mertens
+/* Copyright (c) 2010-2019 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -80,11 +80,13 @@ char* (*bake_rule_map_cb)(
  * specify different kinds of targets as argument type. */
 
 /* A PATTERN is a list of files matched against a pattern (string expression
- * that contains wildcards). A  map is a function that transforms input
- * files to output files (like foo.c => foo.o) */
+ * that contains wildcards). A MAP is a function that transforms input
+ * files to output files (like foo.c => foo.o). A FILE returns a single file,
+ * regardless of whether this file exists. */
 typedef enum bake_rule_targetKind {
     BAKE_RULE_TARGET_MAP,
-    BAKE_RULE_TARGET_PATTERN
+    BAKE_RULE_TARGET_PATTERN,
+    BAKE_RULE_TARGET_FILE
 } bake_rule_targetKind;
 
 /* A rule target specifies the expected list of files as result of a rule. When
@@ -111,7 +113,8 @@ typedef struct bake_rule_target {
  * file (typical example: a .c file and .o file). */
 typedef enum bake_rule_kind {
     BAKE_RULE_PATTERN,
-    BAKE_RULE_RULE
+    BAKE_RULE_RULE,
+    BAKE_RULE_FILE
 } bake_rule_kind;
 
 /* The driver API is a struct that is passed to the bakemain function, which is
@@ -128,10 +131,26 @@ struct bake_driver_api {
     void (*import)(
         const char *driver);
 
+    /* Lookup another driver by name */
+    bake_driver* (*lookup_driver)(
+        const char *driver);
+    
+    /* Get pointer to current driver */
+    bake_driver* (*current_driver)(void);
+
+    /* Switch API to (temporarily) control another driver */
+    bake_driver* (*set_driver)(
+        bake_driver *driver);
+
     /* Create a pattern */
     void (*pattern)(
         const char *name,
         const char *pattern);
+
+    /* Create a pattern */
+    void (*file)(
+        const char *name,
+        const char *file);
 
     /* Create a rule */
     void (*rule)(
@@ -150,6 +169,10 @@ struct bake_driver_api {
     /* Create a pattern target (n-to-1 rule) */
     bake_rule_target (*target_pattern)(
         const char *pattern);
+
+    /* Create a file target (n-to-1 rule) */
+    bake_rule_target (*target_file)(
+        const char *file);        
 
     /* Create a map target (n-to-n rule) */
     bake_rule_target (*target_map)(
@@ -183,6 +206,10 @@ struct bake_driver_api {
     /* Callback called before build */
     void (*prebuild)(
         bake_driver_cb action);
+
+    /* Callback called at build stage */
+    void (*build)(
+        bake_driver_cb action);        
 
     /* Callback called after build */
     void (*postbuild)(
@@ -228,6 +255,10 @@ struct bake_driver_api {
     char* (*get_attr_string)(
         const char *name);
 
+    /* Get a driver-specific array attribute */
+    ut_ll (*get_attr_array)(
+        const char *name);        
+
     /* Get a driver-specific attribute */
     void (*set_attr_string)(
         const char *name,
@@ -242,6 +273,9 @@ struct bake_driver_api {
     void (*set_attr_array)(
         const char *name,
         const char *value);
+
+    /* Get direct access to parson data */
+    JSON_Object* (*get_json)(void);
 };
 
 #endif

@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 the corto developers
+/* Copyright (c) 2010-2019 the corto developers
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -22,6 +22,7 @@
 #include "../include/util.h"
 
 void ut_sleep(unsigned int sec, unsigned int nanosec) {
+#ifndef _WIN32
     struct timespec sleepTime;
 
     sleepTime.tv_sec = sec;
@@ -29,6 +30,9 @@ void ut_sleep(unsigned int sec, unsigned int nanosec) {
     if (nanosleep(&sleepTime, NULL)) {
         ut_error("nanosleep failed: %s", strerror(errno));
     }
+#else
+	Sleep(sec + nanosec/1000000);
+#endif
 }
 
 void timespec_gettime(struct timespec* time) {
@@ -40,6 +44,8 @@ void timespec_gettime(struct timespec* time) {
     mach_port_deallocate(mach_task_self(), cclock);
     time->tv_sec = mts.tv_sec;
     time->tv_nsec = mts.tv_nsec;
+#elif _WIN32
+    timespec_get(time, TIME_UTC);
 #else
     clock_gettime(CLOCK_REALTIME, time);
 #endif
@@ -107,4 +113,15 @@ char *timespec_to_str(
     struct tm *_tm = localtime(&now);
     strftime(str, sizeof(str) - 1, "%d %m %Y %H:%M", _tm);
     return ut_strdup(str);
+}
+
+double timespec_measure(
+    struct timespec *start)
+{
+    struct timespec stop, temp;
+    timespec_gettime(&stop);
+    temp = stop;
+    stop = timespec_sub(stop, *start);
+    *start = temp;
+    return timespec_toDouble(stop);
 }

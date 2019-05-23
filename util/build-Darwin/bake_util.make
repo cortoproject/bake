@@ -11,20 +11,28 @@ endif
 .PHONY: clean prebuild prelink
 
 ifeq ($(config),debug)
-  RESCOMP = windres
+  ifeq ($(origin CC), default)
+    CC = clang
+  endif
+  ifeq ($(origin CXX), default)
+    CXX = clang++
+  endif
+  ifeq ($(origin AR), default)
+    AR = ar
+  endif
   TARGETDIR = ..
-  TARGET = $(TARGETDIR)/libbake_util.so
+  TARGET = $(TARGETDIR)/libbake_util.dylib
   OBJDIR = ../.bake_cache/debug
   DEFINES += -DUT_IMPL -DDEBUG
   INCLUDES += -I.. -I"$(BAKE_HOME)/include"
   FORCE_INCLUDE +=
   ALL_CPPFLAGS += $(CPPFLAGS) -MMD -MP $(DEFINES) $(INCLUDES)
-  ALL_CFLAGS += $(CFLAGS) $(ALL_CPPFLAGS) -fPIC -g -std=c99 -D_XOPEN_SOURCE=600
-  ALL_CXXFLAGS += $(CXXFLAGS) $(ALL_CPPFLAGS) -fPIC -g -std=c99 -D_XOPEN_SOURCE=600
+  ALL_CFLAGS += $(CFLAGS) $(ALL_CPPFLAGS) -fPIC -g
+  ALL_CXXFLAGS += $(CXXFLAGS) $(ALL_CPPFLAGS) -fPIC -g
   ALL_RESFLAGS += $(RESFLAGS) $(DEFINES) $(INCLUDES)
-  LIBS += -lrt -ldl -lpthread -lm
+  LIBS += -ldl -lpthread
   LDDEPS +=
-  ALL_LDFLAGS += $(LDFLAGS) -shared -Wl,-soname=libbake_util.so
+  ALL_LDFLAGS += $(LDFLAGS) -dynamiclib -Wl,-install_name,@rpath/libbake_util.dylib
   LINKCMD = $(CC) -o "$@" $(OBJECTS) $(RESOURCES) $(ALL_LDFLAGS) $(LIBS)
   define PREBUILDCMDS
   endef
@@ -38,20 +46,28 @@ all: prebuild prelink $(TARGET)
 endif
 
 ifeq ($(config),release)
-  RESCOMP = windres
+  ifeq ($(origin CC), default)
+    CC = clang
+  endif
+  ifeq ($(origin CXX), default)
+    CXX = clang++
+  endif
+  ifeq ($(origin AR), default)
+    AR = ar
+  endif
   TARGETDIR = ..
-  TARGET = $(TARGETDIR)/libbake_util.so
+  TARGET = $(TARGETDIR)/libbake_util.dylib
   OBJDIR = ../.bake_cache/release
   DEFINES += -DUT_IMPL -DNDEBUG
   INCLUDES += -I.. -I"$(BAKE_HOME)/include"
   FORCE_INCLUDE +=
   ALL_CPPFLAGS += $(CPPFLAGS) -MMD -MP $(DEFINES) $(INCLUDES)
-  ALL_CFLAGS += $(CFLAGS) $(ALL_CPPFLAGS) -O2 -fPIC -std=c99 -D_XOPEN_SOURCE=600
-  ALL_CXXFLAGS += $(CXXFLAGS) $(ALL_CPPFLAGS) -O2 -fPIC -std=c99 -D_XOPEN_SOURCE=600
+  ALL_CFLAGS += $(CFLAGS) $(ALL_CPPFLAGS) -O2 -fPIC
+  ALL_CXXFLAGS += $(CXXFLAGS) $(ALL_CPPFLAGS) -O2 -fPIC
   ALL_RESFLAGS += $(RESFLAGS) $(DEFINES) $(INCLUDES)
-  LIBS += -lrt -ldl -lpthread -lm
+  LIBS += -ldl -lpthread
   LDDEPS +=
-  ALL_LDFLAGS += $(LDFLAGS) -shared -Wl,-soname=libbake_util.so -s
+  ALL_LDFLAGS += $(LDFLAGS) -dynamiclib -Wl,-install_name,@rpath/libbake_util.dylib
   LINKCMD = $(CC) -o "$@" $(OBJECTS) $(RESOURCES) $(ALL_LDFLAGS) $(LIBS)
   define PREBUILDCMDS
   endef
@@ -65,7 +81,7 @@ all: prebuild prelink $(TARGET)
 endif
 
 OBJECTS := \
-	$(OBJDIR)/dl.o \
+	$(OBJDIR)/code.o \
 	$(OBJDIR)/env.o \
 	$(OBJDIR)/expr.o \
 	$(OBJDIR)/file.o \
@@ -79,11 +95,13 @@ OBJECTS := \
 	$(OBJDIR)/os.o \
 	$(OBJDIR)/parson.o \
 	$(OBJDIR)/path.o \
+	$(OBJDIR)/dl.o \
+	$(OBJDIR)/fs1.o \
 	$(OBJDIR)/proc.o \
+	$(OBJDIR)/thread.o \
 	$(OBJDIR)/rb.o \
 	$(OBJDIR)/strbuf.o \
 	$(OBJDIR)/string.o \
-	$(OBJDIR)/thread.o \
 	$(OBJDIR)/time.o \
 	$(OBJDIR)/util.o \
 	$(OBJDIR)/version.o \
@@ -145,7 +163,7 @@ else
 $(OBJECTS): | $(OBJDIR)
 endif
 
-$(OBJDIR)/dl.o: ../src/dl.c
+$(OBJDIR)/code.o: ../src/code.c
 	@echo $(notdir $<)
 	$(SILENT) $(CC) $(ALL_CFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
 $(OBJDIR)/env.o: ../src/env.c
@@ -187,7 +205,16 @@ $(OBJDIR)/parson.o: ../src/parson.c
 $(OBJDIR)/path.o: ../src/path.c
 	@echo $(notdir $<)
 	$(SILENT) $(CC) $(ALL_CFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
-$(OBJDIR)/proc.o: ../src/proc.c
+$(OBJDIR)/dl.o: ../src/posix/dl.c
+	@echo $(notdir $<)
+	$(SILENT) $(CC) $(ALL_CFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
+$(OBJDIR)/fs1.o: ../src/posix/fs.c
+	@echo $(notdir $<)
+	$(SILENT) $(CC) $(ALL_CFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
+$(OBJDIR)/proc.o: ../src/posix/proc.c
+	@echo $(notdir $<)
+	$(SILENT) $(CC) $(ALL_CFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
+$(OBJDIR)/thread.o: ../src/posix/thread.c
 	@echo $(notdir $<)
 	$(SILENT) $(CC) $(ALL_CFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
 $(OBJDIR)/rb.o: ../src/rb.c
@@ -197,9 +224,6 @@ $(OBJDIR)/strbuf.o: ../src/strbuf.c
 	@echo $(notdir $<)
 	$(SILENT) $(CC) $(ALL_CFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
 $(OBJDIR)/string.o: ../src/string.c
-	@echo $(notdir $<)
-	$(SILENT) $(CC) $(ALL_CFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
-$(OBJDIR)/thread.o: ../src/thread.c
 	@echo $(notdir $<)
 	$(SILENT) $(CC) $(ALL_CFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
 $(OBJDIR)/time.o: ../src/time.c

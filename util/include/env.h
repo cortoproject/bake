@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 Sander Mertens
+/* Copyright (c) 2010-2019 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -39,6 +39,20 @@ extern "C" {
  */
 UT_EXPORT 
 int16_t ut_setenv(
+    const char *varname, 
+    const char *value, 
+    ...);
+
+/** Append a value to an environment variable.
+ * 
+ * Used for appending to PATH-like variables. A separator (':', ';') will be
+ * added to the value.
+ * 
+ * @param varname Name of environment variable
+ * @param value Value to append to environment variable.
+ * @return 0 if success, non-zero if failed.
+ */
+int16_t ut_appendenv(
     const char *varname, 
     const char *value, 
     ...);

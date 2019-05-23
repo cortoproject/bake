@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 Sander Mertens
+/* Copyright (c) 2010-2019 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -29,7 +29,8 @@ typedef int (*bake_crawler_cb)(
  *
  * @return New crawler object.
  */
- void bake_crawler_init(void);
+ void bake_crawler_init(
+    bool recursive);
 
 /** Free crawler.
  *

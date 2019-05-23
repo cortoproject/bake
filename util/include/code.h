@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 Sander Mertens
+/* Copyright (c) 2010-2019 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -19,34 +19,54 @@
  * THE SOFTWARE.
  */
 
-#include "../include/util.h"
+/** @code
+ * @section Source code utility API
+ * @brief Utility functions for generating source code
+ */
 
-typedef void*(*dlproc)(void);
+#ifndef UT_CODE_H
+#define UT_CODE_H
 
-/* Link dynamic library */
-ut_dl ut_dl_open(const char* file) {
-    ut_dl dl;
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-    dl = (ut_dl)dlopen(file, RTLD_NOW | RTLD_LOCAL);
+typedef struct ut_code {
+    FILE* file;
+    char *name;
+    uint32_t indent;
+    bool endLine; /* If last written character was a '\n', the next write must insert indentation spaces. */
+} ut_code;
 
-    return dl;
+/* Open a file for writing. */
+UT_EXPORT
+ut_code* ut_code_open(
+    const char *name,
+    ...);
+
+/* Close a file. */
+UT_EXPORT
+void ut_code_close(
+    ut_code *file);
+
+/* Increase indentation. */
+UT_EXPORT
+void ut_code_indent(
+    ut_code *file);
+
+/* Decrease indentation. */
+UT_EXPORT
+void ut_code_dedent(
+    ut_code *file);
+
+/* Write to a file. */
+UT_EXPORT
+int ut_code_write(
+    ut_code *file,
+    char* fmt, ...);
+
+#ifdef __cplusplus
 }
+#endif
 
-/* Close dynamic library */
-void ut_dl_close(ut_dl dl) {
-    dlclose(dl);
-}
-
-/* Lookup symbol in dynamic library */
-void* ut_dl_sym(ut_dl dl, const char* sym) {
-    return dlsym(dl, sym);
-}
-
-/* Lookup procedure in dynamic library */
-void*(*ut_dl_proc(ut_dl dl, const char* proc))(void) {
-    return (dlproc)(intptr_t)dlsym(dl, proc);
-}
-
-const char* ut_dl_error(void) {
-    return dlerror();
-}
+#endif

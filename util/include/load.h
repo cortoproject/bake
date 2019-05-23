@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 Sander Mertens
+/* Copyright (c) 2010-2019 Sander Mertens
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -27,6 +27,36 @@ extern "C" {
 #endif
 
 typedef int (*ut_load_cb)(char *file, int argc, char* argv[], void* userData);
+
+/* Information about current target */
+extern char *UT_ARCH;
+extern char *UT_OS;
+extern char *UT_PLATFORM;  /* arch-os */
+extern char *UT_CONFIG;
+
+/* Paths to bake environment locations */
+extern char *UT_HOME_PATH;
+extern char *UT_TARGET_PATH;
+extern char *UT_PLATFORM_PATH;
+extern char *UT_META_PATH;
+extern char *UT_INCLUDE_PATH;
+extern char *UT_ETC_PATH;
+extern char *UT_SRC_PATH;
+extern char *UT_TEMPLATE_PATH;
+extern char *UT_BIN_PATH;
+extern char *UT_LIB_PATH;
+extern char *UT_JAVA_PATH;
+extern char *UT_HOME_LIB_PATH;
+extern char *UT_HOME_BIN_PATH;
+
+/* Extensions for the used target */
+extern char *UT_SHARED_LIB_EXT;
+extern char *UT_STATIC_LIB_EXT;
+extern char *UT_EXECUTABLE_EXT;
+extern char *UT_BIN_EXT;
+extern char *UT_LIB_EXT;
+extern char *UT_STATIC_LIB_EXT;
+extern char *UT_LIB_PREFIX;
 
 /** Load a resource.
  * The ut_use function provides a single interface to loading files or
@@ -85,7 +115,6 @@ int ut_run(
     char *argv[]);
 
 typedef enum ut_locate_kind {
-    UT_LOCATE_ENV,     /* environment, for example: /usr/local */
     UT_LOCATE_LIB,     /* full path to library */
     UT_LOCATE_STATIC,  /* full path to static library */
     UT_LOCATE_APP,     /* full path to application */
@@ -95,7 +124,8 @@ typedef enum ut_locate_kind {
     UT_LOCATE_PROJECT, /* full path to project directory */
     UT_LOCATE_SOURCE,  /* full path to project source */
     UT_LOCATE_DEVSRC,  /* full path to project development source */
-    UT_LOCATE_TEMPLATE /* full path to templates directory */
+    UT_LOCATE_TEMPLATE,/* full path to templates directory */
+    UT_LOCATE_REPO_ID  /* project repository identifier ('-' instead of '.') */
 } ut_locate_kind;
 
 /** Find project locations in the package hierarchy.
@@ -133,6 +163,17 @@ const char* ut_locate(
     const char *package,
     ut_dl *dl_out,
     ut_locate_kind kind);
+
+/** Test if package is part of the build toolchain */
+UT_EXPORT
+bool ut_project_is_buildtool(
+    const char *id);
+
+/** Test if package is available for config */
+UT_EXPORT
+bool ut_project_in_config(
+    const char *id,
+    const char *cfg);
 
 /** Reset locate cache to force subsequent ut_locate calls to redo lookup.
  * The ut_locate operation caches its results, so that subsequent calls can skip
@@ -179,9 +220,9 @@ void ut_locate_reset(
  */
 UT_EXPORT
 void* ut_load_sym(
-    char *package,
+    const char *package,
     ut_dl *dl_out,
-    char *symbol);
+    const char *symbol);
 
 /** Same as ut_load_sym, but for procedures.
  *
@@ -189,9 +230,9 @@ void* ut_load_sym(
  */
 UT_EXPORT
 void (*ut_load_proc(
-    char *package,
+    const char *package,
     ut_dl *dl_out,
-    char *symbol))(void);
+    const char *symbol))(void);
 
 /** Register a load action.
  * The `ut_load_register` function registers a load action that needs to be
@@ -225,24 +266,13 @@ int ut_load_register(
 /* Internal function for initializing paths in loader */
 UT_EXPORT
 int16_t ut_load_init(
-    const char *target,
     const char *home,
+    const char *arch,
+    const char *os,
     const char *config);
 
 UT_EXPORT
 void ut_load_deinit(void);
-
-UT_EXPORT
-const char* ut_load_homePath(void);
-
-UT_EXPORT
-const char* ut_load_targetPath(void);
-
-UT_EXPORT
-const char* ut_load_homeMetaPath(void);
-
-UT_EXPORT
-const char* ut_load_targetMetaPath(void);
 
 #ifdef __cplusplus
 }

@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018 the corto developers
+/* Copyright (c) 2010-2019 the corto developers
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -21,6 +21,7 @@
 
  #include "../include/util.h"
 
+#ifndef _WIN32
 int stricmp(const char *str1, const char *str2) {
     const char *ptr1, *ptr2;
     char ch1, ch2;
@@ -67,6 +68,7 @@ int strnicmp(const char *str1, int length, const char *str2) {
 
     return tolower(*ptr1) - tolower(*ptr2);
 }
+#endif // !_WIN32
 
 int idcmp(const char *str1, const char *str2) {
     const char *ptr1, *ptr2;
@@ -304,7 +306,7 @@ size_t stresc(char *out, size_t n, char delimiter, const char *in) {
     return written;
 }
 
-void strset(char **out, const char *str) {
+void ut_strset(char **out, const char *str) {
     if (*out) {
         free(*out);
     }
